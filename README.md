@@ -37,6 +37,7 @@ uvx kaggle datasets download -d dreaddevelopment/raptor-knee-maxspan \
 | `src/explain/raptor.py` | Loads the public "raptor" CoaTNet and reproduces its preprocessing (64 slices / 5 plane slots, 140 mm crop, 62 three-slice windows). Matches the checkpoint's gold AUC (0.920 vs 0.921). |
 | `src/explain/raptor_gradcam.py` | Grad-CAM / LayerCAM per label and window at CoaTNet stages 1–3, map ensembles, deletion faithfulness and blob-compactness metrics, HTML gallery. |
 | `src/explain/pseudo_boxes.py` | Two-level pseudo-boxes: region box from 12×12 Grad-CAM, peak point and tight box from the LayerCAM ensemble, per-label choice (`BOX_LEVEL`), model-based box scoring. |
+| `src/data/laterality.py` | Left/right knee per study (vote of DICOM tag, series description, report text, geometry; 99.8% resolved) and the medial image direction per series. |
 | `src/data/extract_2d_slices.py` | Extracts every train series to per-series-normalised PNGs. |
 
 `src/models/` (YOLO cropper, CNN classifier, 2.5D transformer) and
@@ -57,7 +58,17 @@ uv run python -m src.explain.raptor_gradcam --studies gold \
 - `--reuse DIR`: load study volumes saved by an earlier run instead of reading DICOMs.
 - `--gallery-only`: rebuild `gallery.html` from an existing output directory.
 
+- `--fast`: bulk mode for pseudo-boxes: maps `L3 LC1+L3` only, no deletion test or gallery,
+  resumable (re-run the same command to continue).  ~2.6 s/study.
+
 Outputs: `preds.csv`, `deletion.csv`, `summary.csv`, `studies/*.npz`, `gallery.html`.
+
+Bulk run over the whole train set (~3 h, ~24 GB):
+
+```sh
+uv run python -m src.explain.raptor_gradcam --studies all --fast \
+    --out assets/processed/gradcam_raptor/train_fast
+```
 
 Pseudo-boxes from a Grad-CAM output directory that has `L3` and `LC1+L3` maps:
 
@@ -69,6 +80,13 @@ uv run python -m src.explain.pseudo_boxes \
 Writes `<src>/boxes/pseudo_boxes.csv` (final box in `x0..y1`, YOLO-normalised `cx cy w h`,
 both on the 336 px / 140 mm crop), `box_scores.csv` with `--eval`, and `boxes.html`.
 ACL and Medial Meniscus are excluded for now (`--all-labels` to include them).
+
+Laterality (writes `assets/processed/laterality_<split>.csv` and
+`series_orientation_<split>.csv`, ~15 s):
+
+```sh
+uv run python -m src.data.laterality --split train
+```
 
 Registered pipelines:
 

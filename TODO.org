@@ -6,10 +6,16 @@
 ** DONE Phase 0: Session Initialization
    - [X] Hardware/OS/style constraints captured in =GEMINI.md=.
 
-** TODO Phase 1: Storage and Preprocessing [1/4]
+** TODO Phase 1: Storage and Preprocessing [2/5]
    - [X] Extract every train series to per-series-normalized PNGs
          (=src/data/extract_2d_slices.py= -> =assets/processed/2d_slices/train=, 819k PNGs, 124G).
    - [ ] Join =train.csv= / =train_series.csv= (only stubbed in =dagster_assets.py=).
+   - [X] Laterality (=src/data/laterality.py= -> =assets/processed/laterality_train.csv=,
+         =series_orientation_train.csv=).  Majority vote of DICOM tag (50% coverage), series
+         description (13%), report text (38%), and image-centre geometry (97%); every pair agrees
+         ~98%.  Resolved 99.8%, unanimous 98.6%.  =medial_sign= per series gives the image axis
+         that points medially; checked with Grad-CAM: MCL and Medial OA mass lands medial in 79%
+         of gold studies, Baker's 72% (posteromedial), Fracture 83% lateral (lateral plateau).
    - [ ] Fixed-size study cache: pick series per plane slot, sample slices, mm-based
          center crop using PixelSpacing (lost in the PNGs -> re-read DICOM headers),
          store uint8 =.npy= per study.
@@ -30,7 +36,7 @@
    - [X] Pluggable registry (=src/models/registry.py=) + =main.py --pipeline= routing.
    - [ ] Shared config / data modules so pipelines stop hardcoding paths and mock data.
 
-** TODO Phase 4: Pipeline A - Grad-CAM Weak Supervision (Active Target) [7/11]
+** TODO Phase 4: Pipeline A - Grad-CAM Weak Supervision (Active Target) [8/12]
    - Current code (=gradcam.py=, =yolo_cropper.py=, =cnn_classifier.py=) is a prototype
      only: untrained ResNet18 on noise, a 1-row dummy =pseudo_boxes.csv=, YOLO trained
      1 epoch on a black image.  The =runs/detect/.../knee_cropper= weights are meaningless.
@@ -63,8 +69,12 @@
            Med OA 80/87, PF OA 48/81, Contusion 74/84, Lat OA 82/73, Med meniscus 46/62, ACL 57/52.
          - =BOX_LEVEL= picks per label; ACL and Medial Meniscus excluded for now (ACL boxes land
            posterior, not in the notch).  Tuned and scored on the same 58 studies (n=9-35 per label).
-   - [ ] Bulk boxes for the full train set: =raptor_gradcam= needs a =--no-deletion= mode and
-         maps limited to =L3 LC1+L3= (positives from LLM labels >= 0.7).
+   - [X] Fast mode: =raptor_gradcam --fast= (no deletion/gallery, maps =L3 LC1+L3=, fine maps
+         only for positives, resumable, bounded RAM).  2.6 s/study, ~5.5 MB/study; 30-study test
+         -> 7.5 boxes/study.
+   - [ ] Bulk run (~3.2 h, ~24 GB):
+         =uv run python -m src.explain.raptor_gradcam --studies all --fast --out assets/processed/gradcam_raptor/train_fast=
+         then =uv run python -m src.explain.pseudo_boxes --src assets/processed/gradcam_raptor/train_fast=
    - [X] Option 1 for ACL / Medial Meniscus: restrict boxes to slice types (=BOX_SLOTS=).
          Did not rescue either; both stay excluded from YOLO v1.
          - ACL: attention is already 92% sagittal, so restricting is a no-op (same boxes).  The

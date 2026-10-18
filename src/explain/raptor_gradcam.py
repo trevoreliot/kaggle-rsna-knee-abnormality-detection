@@ -26,6 +26,8 @@ Usage:
     uv run python -m src.explain.raptor_gradcam --maps L3 LC1 LC1+L3 \\
         --reuse assets/processed/gradcam_raptor/gold_multi --out DIR
     uv run python -m src.explain.raptor_gradcam --out DIR --gallery-only
+    uv run python -m src.explain.raptor_gradcam --studies all --fast \\
+        --out assets/processed/gradcam_raptor/train_fast      # bulk, resumable
 """
 
 import argparse
@@ -34,6 +36,7 @@ import html
 import json
 import re
 import time
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -51,6 +54,7 @@ LLM_LABELS = (raptor.DATA_DIR / "custom_labels/slh/kneelabels-stevenleehans"
               / "llm_labels_full.csv")
 OUT_DIR = Path("assets/processed/gradcam_raptor")
 DEFAULT_MAPS = ["L3", "L2", "L1", "L1+L2"]
+FAST_MAPS = ["L3", "LC1+L3"]  # what src.explain.pseudo_boxes uses
 
 
 # --------------------------------------------------------------------------- #
@@ -246,6 +250,8 @@ def _load_tables():
 def select_studies(spec, train, gold, seed=0):
     if spec == "gold":
         return list(gold.index)
+    if spec == "all":
+        return list(train.StudyInstanceUID)
     if Path(spec).is_file():
         return [s.strip() for s in Path(spec).read_text().split() if s.strip()]
     rest = train.loc[~train.StudyInstanceUID.isin(gold.index), "StudyInstanceUID"]
@@ -402,28 +408,80 @@ def _load_reused(args):
     return uid, z["vol"], z["mask"], list(z["slot_series"]), None
 
 
-def run(studies="gold", maps=DEFAULT_MAPS, frac=0.05, workers=6, out_dir=OUT_DIR,
-        reuse=None, seed=0):
-    """``reuse``: a previous output dir whose saved study volumes replace DICOM reads."""
+def _bounded_map(pool, fn, jobs, ahead):
+    """Like ``pool.map`` but keeps at most ``ahead`` results in flight, so fast
+    DICOM workers cannot pile decoded volumes up in RAM ahead of the GPU."""
+    jobs, pending = iter(jobs), deque()
+    for job in jobs:
+        pending.append(pool.submit(fn, job))
+        if len(pending) >= ahead:
+            break
+    while pending:
+        yield pending.popleft().result()
+        for job in jobs:
+            pending.append(pool.submit(fn, job))
+            break
+
+
+def _positive_labels(uid, gold, llm, llm_thr):
+    """Label indices treated as positive: gold labels if present, else LLM >= thr."""
+    if uid in gold.index:
+        return [n for n, lab in enumerate(raptor.LABELS) if gold.loc[uid, lab] == 1]
+    if uid in llm.index:
+        return [n for n, lab in enumerate(raptor.LABELS) if llm.loc[uid, lab] >= llm_thr]
+    return []
+
+
+def _write_preds(out_dir, uids, gold, llm):
+    """preds.csv from the saved study files (so resumed runs are complete)."""
+    rows = []
+    for uid in uids:
+        f = out_dir / "studies" / f"{uid}.npz"
+        if not f.exists():
+            continue
+        probs = np.load(f, allow_pickle=False)["probs"]
+        g = gold.loc[uid] if uid in gold.index else None
+        for n, lab in enumerate(raptor.LABELS):
+            rows.append({"study": uid, "label": lab, "prob": probs[n],
+                         "gold": np.nan if g is None else g[lab],
+                         "llm": llm.loc[uid, lab] if uid in llm.index else np.nan})
+    pd.DataFrame(rows).to_csv(out_dir / "preds.csv", index=False)
+    return len(rows) // len(raptor.LABELS)
+
+
+def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
+        reuse=None, seed=0, fast=False, llm_thr=0.7):
+    """Grad-CAM over ``studies``.
+
+    ``reuse``: a previous output dir whose saved study volumes replace DICOM reads.
+    ``fast``: bulk mode for pseudo-box generation.  Skips the deletion test and
+    the gallery, defaults to the maps the box generator uses (L3, LC1+L3),
+    stores maps other than L3 only for positive labels (gold, else LLM >=
+    ``llm_thr``), and resumes by skipping studies already written.
+    """
     out_dir = Path(out_dir)
     (out_dir / "studies").mkdir(parents=True, exist_ok=True)
-    maps = list(maps)
+    maps = list(maps or (FAST_MAPS if fast else DEFAULT_MAPS))
     _, layers = parse_maps(maps)
-    (out_dir / "meta.json").write_text(json.dumps({"maps": maps, "frac": frac}))
+    (out_dir / "meta.json").write_text(json.dumps(
+        {"maps": maps, "frac": frac, "fast": fast, "llm_thr": llm_thr}))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train, gold, llm = _load_tables()
     uids = select_studies(studies, train, gold, seed)
+    todo = [u for u in uids if not (out_dir / "studies" / f"{u}.npz").exists()] if fast else uids
     model = raptor.load_model(device)
-    print(f"{len(uids)} studies | maps {maps} | device {device}", flush=True)
+    print(f"{len(uids)} studies ({len(uids) - len(todo)} already done) | maps {maps} | "
+          f"{'fast' if fast else 'full'} | device {device}", flush=True)
 
     if reuse:
-        loader, jobs = _load_reused, [(u, reuse) for u in uids]
+        loader, jobs = _load_reused, [(u, reuse) for u in todo]
     else:
         series = raptor.load_series_table("train")
-        loader, jobs = _build, [(u, series.get(u, [])) for u in uids]
-    pred_rows, del_rows, t0 = [], [], time.time()
+        loader, jobs = _build, [(u, series.get(u, [])) for u in todo]
+    del_rows, t0 = [], time.time()
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        for i, (uid, vol, mask, slot_series, err) in enumerate(pool.map(loader, jobs)):
+        for i, (uid, vol, mask, slot_series, err) in enumerate(
+                _bounded_map(pool, loader, jobs, ahead=2 * workers)):
             if err:
                 print(f"  skip {uid[-12:]}: {err}", flush=True)
                 continue
@@ -437,21 +495,31 @@ def run(studies="gold", maps=DEFAULT_MAPS, frac=0.05, workers=6, out_dir=OUT_DIR
                 continue
             out = {m: base[m] if m in base else ensemble(base, m.split("+")) for m in maps}
             g = gold.loc[uid] if uid in gold.index else None
-            for n, lab in enumerate(raptor.LABELS):
-                pred_rows.append({"study": uid, "label": lab, "prob": probs[n],
-                                  "gold": np.nan if g is None else g[lab],
-                                  "llm": llm.loc[uid, lab] if uid in llm.index else np.nan})
-            test_labels = [n for n, lab in enumerate(raptor.LABELS)
-                           if probs[n] >= 0.3 or (g is not None and g[lab] == 1)]
-            for r in deletion_test(model, x, out, test_labels, frac, attn, seed=seed + i):
-                del_rows.append({"study": uid, **r})
+            if fast:
+                keep = np.zeros(len(raptor.LABELS), bool)
+                keep[_positive_labels(uid, gold, llm, llm_thr)] = True
+                for m in maps:
+                    if m != "L3":
+                        out[m][~keep] = 0  # zeros compress to almost nothing
+            else:
+                test_labels = [n for n, lab in enumerate(raptor.LABELS)
+                               if probs[n] >= 0.3 or (g is not None and g[lab] == 1)]
+                for r in deletion_test(model, x, out, test_labels, frac, attn, seed=seed + i):
+                    del_rows.append({"study": uid, **r})
             np.savez_compressed(
                 out_dir / "studies" / f"{uid}.npz", vol=vol, mask=mask, centers=centers,
                 probs=probs, attn=attn, slot_series=np.array([s or "" for s in slot_series]),
                 **{f"cams_{k}": v.astype(np.float16) for k, v in out.items()})
-            print(f"  [{i + 1}/{len(uids)}] {uid[-12:]} | {time.time() - t0:.0f}s", flush=True)
+            if not fast or (i + 1) % 25 == 0 or i + 1 == len(todo):
+                rate = (time.time() - t0) / (i + 1)
+                print(f"  [{i + 1}/{len(todo)}] {uid[-12:]} | {time.time() - t0:.0f}s | "
+                      f"{rate:.1f}s/study | eta {rate * (len(todo) - i - 1) / 3600:.1f}h",
+                      flush=True)
 
-    pd.DataFrame(pred_rows).to_csv(out_dir / "preds.csv", index=False)
+    n = _write_preds(out_dir, uids, gold, llm)
+    print(f"preds.csv: {n} studies", flush=True)
+    if fast:
+        return out_dir
     pd.DataFrame(del_rows).to_csv(out_dir / "deletion.csv", index=False)
     summarize(out_dir).to_csv(out_dir / "summary.csv", index=False)
     path = build_gallery(out_dir)
@@ -468,9 +536,9 @@ class RaptorGradCamPipeline:
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--studies", default="gold",
-                    help="'gold' (58 manual-label studies), an integer N (random "
-                         "non-gold studies), or a file of StudyInstanceUIDs")
-    ap.add_argument("--maps", nargs="+", default=DEFAULT_MAPS,
+                    help="'gold' (58 manual-label studies), 'all' (every train study), "
+                         "an integer N (random non-gold studies), or a file of UIDs")
+    ap.add_argument("--maps", nargs="+", default=None,
                     help="maps to compute: L<k> Grad-CAM or LC<k> LayerCAM at stage k "
                          "(1: 48x48, 2: 24x24, 3: 12x12); join with + for a "
                          "geometric-mean ensemble, e.g. LC1+L3")
@@ -480,11 +548,17 @@ def main():
     ap.add_argument("--out", default=str(OUT_DIR))
     ap.add_argument("--reuse", help="earlier output dir to load study volumes from")
     ap.add_argument("--gallery-only", action="store_true")
+    ap.add_argument("--fast", action="store_true",
+                    help="bulk pseudo-box mode: no deletion test or gallery, maps "
+                         f"{FAST_MAPS}, fine maps only for positives, resumable")
+    ap.add_argument("--llm-thr", type=float, default=0.7,
+                    help="LLM soft-label threshold for positives in --fast mode")
     a = ap.parse_args()
     if a.gallery_only:
         print(build_gallery(a.out))
     else:
-        run(a.studies, a.maps, a.frac, a.workers, a.out, a.reuse)
+        run(a.studies, a.maps, a.frac, a.workers, a.out, a.reuse, fast=a.fast,
+            llm_thr=a.llm_thr)
 
 
 if __name__ == "__main__":
