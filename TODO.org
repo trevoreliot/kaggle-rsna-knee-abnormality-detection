@@ -1,0 +1,106 @@
+* RSNA Knee Abnormality Detection
+  Audit 2026-10-17 (handoff from Gemini to Claude): phases 3-5 had been marked DONE,
+  but their code only ran on random tensors / a single dummy image.  Status below
+  reflects the real state.  Metric: macro ROC-AUC over 12 labels.
+
+** DONE Phase 0: Session Initialization
+   - [X] Hardware/OS/style constraints captured in =GEMINI.md=.
+
+** TODO Phase 1: Storage and Preprocessing [1/4]
+   - [X] Extract every train series to per-series-normalized PNGs
+         (=src/data/extract_2d_slices.py= -> =assets/processed/2d_slices/train=, 819k PNGs, 124G).
+   - [ ] Join =train.csv= / =train_series.csv= (only stubbed in =dagster_assets.py=).
+   - [ ] Fixed-size study cache: pick series per plane slot, sample slices, mm-based
+         center crop using PixelSpacing (lost in the PNGs -> re-read DICOM headers),
+         store uint8 =.npy= per study.
+   - [ ] Fix or drop =src/data/dagster_assets.py=: wrong labels path, zarr v2 API
+         (=DirectoryStore= is gone in zarr 3), only processes 5 series.
+
+** TODO Phase 2: Community Soft-Label Integration [0/3]
+   - Note: do NOT write an NLP extraction pipeline.
+   - Facts: =train.csv= has manual labels for only 58 / 4407 studies.  Community LLM
+     labels (=custom_labels/slh/kneelabels-stevenleehans/llm_labels_{full,v2,v4_blend}.csv=)
+     cover all 4407 as probabilities.
+   - [ ] Load the community labels, choose a version, merge on =StudyInstanceUID=.
+   - [ ] Label priority: manual label if present, else LLM soft label.
+   - [ ] =sample_weight= column (e.g. 1.0 manual / 0.85 LLM).  Better plan: hold out
+         the 58 manual studies as a clean evaluation set.
+
+** TODO Phase 3: Modular Repository Architecture [1/2]
+   - [X] Pluggable registry (=src/models/registry.py=) + =main.py --pipeline= routing.
+   - [ ] Shared config / data modules so pipelines stop hardcoding paths and mock data.
+
+** TODO Phase 4: Pipeline A - Grad-CAM Weak Supervision (Active Target) [7/11]
+   - Current code (=gradcam.py=, =yolo_cropper.py=, =cnn_classifier.py=) is a prototype
+     only: untrained ResNet18 on noise, a 1-row dummy =pseudo_boxes.csv=, YOLO trained
+     1 epoch on a black image.  The =runs/detect/.../knee_cropper= weights are meaningless.
+   - [X] Download the public "raptor" CoaTNet checkpoint (=dreaddevelopment/raptor-knee-maxspan=,
+         CC0) -> =assets/big-data/public_weights/=.  Port reproduces gold macro AUC 0.920
+         (checkpoint's recorded 0.921).
+   - [X] Real Grad-CAM (=src/explain/raptor_gradcam.py=, =--pipeline raptor_gradcam=), per label
+         and window, at CoaTNet stage 2 (24x24) or stage 3 (12x12).
+   - [X] Gallery + deletion faithfulness on the 58 gold studies
+         (=assets/processed/gradcam_raptor/gold_l2/gallery.html=).  Own-CAM beats shuffled-CAM in
+         86% of cases.  Focal and anatomically right for Effusion, Baker's, Fracture, MCL; diffuse
+         for ACL, menisci, OA, Synovitis.
+   - [X] Map-type study on the 58 gold studies (=gold_multi/=, =gold_layercam/=).  Two metrics
+         that disagree: deletion faithfulness (own > shuffled) vs blob compactness (share of the
+         top-5% pixels in the largest connected region, i.e. can it become a box?).
+         | map            | faithful | blob | blobs |
+         | L3 12x12 GC    |      92% | 0.72 |     4 |
+         | L1+L2 GC ens   |      85% | 0.31 |    25 |
+         | LC2 24x24      |      74% | 0.57 |     6 |
+         | LC1 48x48      |      94% | 0.20 |    37 |
+         | LC1+L3 ens     |      97% | 0.24 |    31 |
+         LayerCAM at 48x48 is the most faithful but is pixel-level speckle along edges: right
+         pixels, no region.  LayerCAM at 12x12 is near chance (51%).  All 48x48-based maps fragment.
+   - [X] Two-level box generator (=src/explain/pseudo_boxes.py=) ->
+         =gold_layercam/boxes/{pseudo_boxes.csv,boxes.html}=.  507 boxes / 189 gold positives.
+         - Fixed a CoaTNet Grad-CAM artefact: a hot (0,0) cell on 8% of top windows (0.7% chance);
+           zeroed, and maps restricted to tissue.
+         - Box vs random-box-on-knee deletion win rate, region / tight: Fracture 100/100,
+           Synovitis 93/85, Baker's 92/83, Effusion 89/77, MCL 78/89, Lat meniscus 70/87,
+           Med OA 80/87, PF OA 48/81, Contusion 74/84, Lat OA 82/73, Med meniscus 46/62, ACL 57/52.
+         - =BOX_LEVEL= picks per label; ACL and Medial Meniscus excluded for now (ACL boxes land
+           posterior, not in the notch).  Tuned and scored on the same 58 studies (n=9-35 per label).
+   - [ ] Bulk boxes for the full train set: =raptor_gradcam= needs a =--no-deletion= mode and
+         maps limited to =L3 LC1+L3= (positives from LLM labels >= 0.7).
+   - [X] Option 1 for ACL / Medial Meniscus: restrict boxes to slice types (=BOX_SLOTS=).
+         Did not rescue either; both stay excluded from YOLO v1.
+         - ACL: attention is already 92% sagittal, so restricting is a no-op (same boxes).  The
+           problem is where within the slice it looks (posterior soft tissue), not which slice.
+         - Med meniscus: coronal-fluid only scores tight 85% / region 73%, but coronal gets just
+           20% of the label's attention, drops are tiny (0.014 vs 0.003 logit), and only ~1/3 of
+           boxes sit on the joint line visually.  Sagittal fluid only: 62%.
+         - Noise: re-scoring the unrestricted baseline moved MM 62->69% and ACL 52->61%
+           (random control boxes, n~25), so treat +-8 pts as noise.
+   - [ ] Option 2 (later): anatomical gate (intercondylar notch for ACL, medial joint line for
+         MM; needs laterality), or revisit with our own Phase 5 model's maps.
+   - [X] RECOMMENDED (revised after LayerCAM): two-level map.  Implemented above.
+         - Region: L3 12x12 Grad-CAM -> pseudo-box, for every label.  Compact (0.72; Baker's 1.00,
+           Effusion 0.94, Synovitis 0.94, Fracture 0.78).  Boxes are coarse (~12mm cells), worst
+           for ACL/menisci (0.52-0.66).
+         - Point: LC1+L3 (97% faithful) -> peak locations *inside* the L3 region, to tighten the
+           box or emit keypoints for the small structures.
+         - Superseded: routing ACL/menisci to L1+L2 (fragmented, 0.30 blob).
+   - [ ] Decide whether heatmaps -> =pseudo_boxes.csv= -> YOLO cropper adds value over the
+         fixed 140mm center crop the public notebook uses.
+   - [ ] Stage 1 (conditional): train YOLO on real pseudo-boxes.
+   - [ ] Stage 2 (conditional): classifier on YOLO crops.
+
+** TODO Phase 5: Pipeline B - 2.5D Sequence Model (own training) [0/3]
+   - Current =sequence_transformer.py= trains on random tensors; no pretrained weights.
+   - [ ] Pretrained =timm= backbone (installed) + attention-MIL / transformer over slices.
+   - [ ] Train on soft labels, 5-fold by =StudyInstanceUID=, BF16 + grad checkpointing.
+   - [ ] Re-run the Phase 4 Grad-CAM analysis on our own model.
+
+** TODO Phase 6: Training and Kaggle Inference [0/4]
+   - [ ] Restrict =num_workers= to avoid starving the GPU.
+   - [ ] K-fold on =StudyInstanceUID= (there is no PatientID column in the data).
+   - [ ] Package =src/= into an offline single-file Kaggle inference script.
+   - [ ] Hybrid DICOM loader: =dicomsdl= first, fall back to =pydicom=.
+
+** TODO Phase 7: Efficiency Track Optimization (Post-Main Competition) [0/3]
+   - [ ] Smart slicing heuristic (central 8-10 slices).
+   - [ ] Lightweight GRU/LSTM aggregator.
+   - [ ] ONNX Runtime FP16 export for Kaggle dual-T4.

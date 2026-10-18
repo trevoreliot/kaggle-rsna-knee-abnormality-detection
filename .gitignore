@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data too large for github
+assets/big-data
+assets/processed
+
+# Model weights and training outputs (ultralytics writes runs/)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+runs/
+
+# Caches
+*.npz
+.ipynb_checkpoints/
