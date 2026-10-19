@@ -128,10 +128,15 @@ def _read_px(path):
     return a
 
 
-def _mm_crop_resize(a, ps):
+def _mm_crop_resize(a, ps, crop_mm=CROP_MM, offset_mm=(0.0, 0.0)):
+    """Square ``crop_mm`` crop around the image centre shifted by ``offset_mm``
+    (x, y), clamped inside the image, resized to IMG."""
     h, w = a.shape
-    cpx = min(int(round(CROP_MM / max(ps, 0.001))), min(h, w))
+    cpx = min(int(round(crop_mm / max(ps, 0.001))), min(h, w))
     y0, x0 = (h - cpx) // 2, (w - cpx) // 2
+    if offset_mm[0] or offset_mm[1]:
+        x0 = int(np.clip(x0 + round(offset_mm[0] / max(ps, 0.001)), 0, w - cpx))
+        y0 = int(np.clip(y0 + round(offset_mm[1] / max(ps, 0.001)), 0, h - cpx))
     return cv2.resize(a[y0:y0 + cpx, x0:x0 + cpx], (IMG, IMG), interpolation=cv2.INTER_AREA)
 
 
@@ -145,8 +150,10 @@ def _pick_series(rows, plane, fluid, used):
     return cands[0] if cands else None
 
 
-def build_study(study_uid, series_rows, series_root):
-    """Return (volume uint8 [MAXS, IMG, IMG], valid-slice mask, series uid per slot)."""
+def build_study(study_uid, series_rows, series_root, crop_mm=CROP_MM, offsets_mm=None):
+    """Return (volume uint8 [MAXS, IMG, IMG], valid-slice mask, series uid per slot).
+
+    ``offsets_mm``: optional per-slot (x, y) shift of the crop centre in mm."""
     vol = np.zeros((MAXS, IMG, IMG), np.uint8)
     slot_series = [None] * len(SLOTS)
     idx, used = 0, set()
@@ -180,7 +187,9 @@ def build_study(study_uid, series_rows, series_root):
         for a, ps in zip(arrs, pss):
             if a is not None:
                 aw = np.clip((a - loq) / (hiq - loq + 1e-6), 0, 1)
-                vol[idx] = (_mm_crop_resize(aw, ps if ps > 0 else med_ps) * 255).astype(np.uint8)
+                off = offsets_mm[s] if offsets_mm is not None else (0.0, 0.0)
+                vol[idx] = (_mm_crop_resize(aw, ps if ps > 0 else med_ps, crop_mm, off)
+                            * 255).astype(np.uint8)
             idx += 1
     mask = (vol.reshape(MAXS, -1).sum(1) > 0).astype(np.uint8)
     return vol, mask, slot_series

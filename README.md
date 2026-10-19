@@ -37,6 +37,8 @@ uvx kaggle datasets download -d dreaddevelopment/raptor-knee-maxspan \
 | `src/explain/raptor.py` | Loads the public "raptor" CoaTNet and reproduces its preprocessing (64 slices / 5 plane slots, 140 mm crop, 62 three-slice windows). Matches the checkpoint's gold AUC (0.920 vs 0.921). |
 | `src/explain/raptor_gradcam.py` | Grad-CAM / LayerCAM per label and window at CoaTNet stages 1–3, map ensembles, deletion faithfulness and blob-compactness metrics, HTML gallery. |
 | `src/explain/pseudo_boxes.py` | Two-level pseudo-boxes: region box from 12×12 Grad-CAM, peak point and tight box from the LayerCAM ensemble, per-label choice (`BOX_LEVEL`), model-based box scoring. |
+| `src/explain/yolo_dataset.py` | Exports pseudo-boxes as an Ultralytics dataset (2.5D slices, split by study, gold studies in val). |
+| `src/explain/yolo_eval.py` | Tests whether the pseudo-box YOLO helps classification (as a score and as a cropper for raptor). It does not. |
 | `src/data/laterality.py` | Left/right knee per study (vote of DICOM tag, series description, report text, geometry; 99.8% resolved) and the medial image direction per series. |
 | `src/data/extract_2d_slices.py` | Extracts every train series to per-series-normalised PNGs. |
 
@@ -81,6 +83,16 @@ Writes `<src>/boxes/pseudo_boxes.csv` (final box in `x0..y1`, YOLO-normalised `c
 both on the 336 px / 140 mm crop), `box_scores.csv` with `--eval`, and `boxes.html`.
 ACL and Medial Meniscus are excluded for now (`--all-labels` to include them).
 
+YOLO on the pseudo-boxes (no horizontal flips: medial / lateral classes depend on image side):
+
+```sh
+uv run python -m src.explain.yolo_dataset --src assets/processed/gradcam_raptor/train_fast
+uv run yolo detect train data=assets/processed/yolo_pseudo/data.yaml model=yolo11s.pt imgsz=384 \
+    epochs=100 patience=20 batch=64 fliplr=0 hsv_h=0 hsv_s=0 \
+    project=$PWD/assets/processed/yolo_runs name=yolo11s_v1
+uv run python -m src.explain.yolo_eval --weights assets/processed/yolo_runs/yolo11s_v1/weights/best.pt
+```
+
 Laterality (writes `assets/processed/laterality_<split>.csv` and
 `series_orientation_<split>.csv`, ~15 s):
 
@@ -100,5 +112,8 @@ uv run python main.py --pipeline raptor_gradcam   # same as the Grad-CAM run wit
 - CoaTNet Grad-CAM has a spurious hot cell at grid (0, 0); the box generator suppresses it.
 - Pseudo-boxes beat random boxes on the knee for 10 of 12 labels (81–100%). ACL and
   medial meniscus are not reliable yet.
+- A YOLO11s trained on 32k pseudo-boxes learns the large findings (Baker's, effusion) but
+  does not improve classification: as a score it lowers raptor's AUC when blended, and
+  re-centring or zooming raptor's crop on its detections does not help (0.943 -> 0.943 / 0.931).
 
 Details and numbers: [`TODO.org`](TODO.org), Phase 4.

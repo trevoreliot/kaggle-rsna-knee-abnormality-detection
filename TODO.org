@@ -36,7 +36,7 @@
    - [X] Pluggable registry (=src/models/registry.py=) + =main.py --pipeline= routing.
    - [ ] Shared config / data modules so pipelines stop hardcoding paths and mock data.
 
-** TODO Phase 4: Pipeline A - Grad-CAM Weak Supervision (Active Target) [8/12]
+** TODO Phase 4: Pipeline A - Grad-CAM Weak Supervision (Active Target) [11/13]
    - Current code (=gradcam.py=, =yolo_cropper.py=, =cnn_classifier.py=) is a prototype
      only: untrained ResNet18 on noise, a 1-row dummy =pseudo_boxes.csv=, YOLO trained
      1 epoch on a black image.  The =runs/detect/.../knee_cropper= weights are meaningless.
@@ -72,9 +72,14 @@
    - [X] Fast mode: =raptor_gradcam --fast= (no deletion/gallery, maps =L3 LC1+L3=, fine maps
          only for positives, resumable, bounded RAM).  2.6 s/study, ~5.5 MB/study; 30-study test
          -> 7.5 boxes/study.
-   - [ ] Bulk run (~3.2 h, ~24 GB):
+   - [X] Bulk run 2026-10-18 (3.2 h, 25 GB, GPU-bound at 100%):
          =uv run python -m src.explain.raptor_gradcam --studies all --fast --out assets/processed/gradcam_raptor/train_fast=
          then =uv run python -m src.explain.pseudo_boxes --src assets/processed/gradcam_raptor/train_fast=
+         -> =train_fast/boxes/pseudo_boxes.csv=: 32,115 boxes (17.9k tight, 14.2k region) for 12,387
+         positives in 3,762 / 4,407 studies.  Per label (studies, median side): Effusion 2622 33mm,
+         PF OA 2028 22mm, Med OA 1656 22mm, Lat OA 1267 42mm, Lat men 1111 21mm, Contusion 1084 21mm,
+         Baker's 1071 32mm, MCL 662 21mm, Synovitis 572 30mm, Fracture 314 20mm.
+         Speed-up for later re-runs: LC1 only on top-attention windows, bf16 backward.
    - [X] Option 1 for ACL / Medial Meniscus: restrict boxes to slice types (=BOX_SLOTS=).
          Did not rescue either; both stay excluded from YOLO v1.
          - ACL: attention is already 92% sagittal, so restricting is a no-op (same boxes).  The
@@ -93,9 +98,23 @@
          - Point: LC1+L3 (97% faithful) -> peak locations *inside* the L3 region, to tighten the
            box or emit keypoints for the small structures.
          - Superseded: routing ACL/menisci to L1+L2 (fragmented, 0.30 blob).
-   - [ ] Decide whether heatmaps -> =pseudo_boxes.csv= -> YOLO cropper adds value over the
-         fixed 140mm center crop the public notebook uses.
-   - [ ] Stage 1 (conditional): train YOLO on real pseudo-boxes.
+   - [X] Stage 1: YOLO11s on pseudo-boxes (=src/explain/yolo_dataset.py= ->
+         =assets/processed/yolo_pseudo/=, 28.6k 2.5D images, val = 58 gold + 10% of studies).
+         =imgsz=384 batch=64 fliplr=0 hsv_h=0 hsv_s=0=, early-stopped at epoch 65 (31 min), best
+         epoch 45 -> =yolo_runs/yolo11s_v1/weights/best.pt=.  mAP50 vs pseudo-boxes 0.127: Baker's
+         0.55, Effusion 0.30, Synovitis 0.19, the rest <= 0.05.  Val box loss flat from epoch ~20 while
+         train loss kept falling: label-noise limit, so YOLO11m was not tried.
+   - [X] Decide whether the YOLO stage adds value (=src/explain/yolo_eval.py=, 492 YOLO-val studies).
+         Answer: not with the frozen raptor model.  Macro AUC over the 10 classes, gold / LLM ref:
+         | raptor centre 140 (baseline)   | 0.910 | 0.943 |
+         | YOLO max conf alone            | 0.762 | 0.764 |
+         | raptor + YOLO rank average     | 0.864 | 0.898 |
+         | raptor, YOLO-recentred 140 mm  | 0.905 | 0.943 |
+         | raptor, centre 112 mm (zoom)   | 0.910 | 0.931 |
+         | raptor, YOLO-recentred 112 mm  | 0.902 | 0.928 |
+         Caveat: raptor was trained on all train studies (in-sample); YOLO numbers are held-out.
+         Zooming is out-of-distribution for raptor, so a classifier *trained* on YOLO crops is
+         still untested (needs Phase 5).
    - [ ] Stage 2 (conditional): classifier on YOLO crops.
 
 ** TODO Phase 5: Pipeline B - 2.5D Sequence Model (own training) [0/3]
