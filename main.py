@@ -5,6 +5,7 @@ import src.models.yolo_cropper # Ensure it registers
 import src.models.cnn_classifier # Ensure it registers
 import src.models.sequence_transformer # Ensure it registers
 import src.explain.raptor_gradcam  # Ensure it registers
+import src.models.mil25d  # Ensure it registers
 
 def main():
     parser = argparse.ArgumentParser(description="RSNA Knee Abnormality Detection Pipeline")

@@ -6,7 +6,7 @@
 ** DONE Phase 0: Session Initialization
    - [X] Hardware/OS/style constraints captured in =GEMINI.md=.
 
-** TODO Phase 1: Storage and Preprocessing [2/5]
+** TODO Phase 1: Storage and Preprocessing [3/5]
    - [X] Extract every train series to per-series-normalized PNGs
          (=src/data/extract_2d_slices.py= -> =assets/processed/2d_slices/train=, 819k PNGs, 124G).
    - [ ] Join =train.csv= / =train_series.csv= (only stubbed in =dagster_assets.py=).
@@ -16,9 +16,9 @@
          ~98%.  Resolved 99.8%, unanimous 98.6%.  =medial_sign= per series gives the image axis
          that points medially; checked with Grad-CAM: MCL and Medial OA mass lands medial in 79%
          of gold studies, Baker's 72% (posteromedial), Fracture 83% lateral (lateral plateau).
-   - [ ] Fixed-size study cache: pick series per plane slot, sample slices, mm-based
-         center crop using PixelSpacing (lost in the PNGs -> re-read DICOM headers),
-         store uint8 =.npy= per study.
+   - [X] Fixed-size study cache (=src/data/study_cache.py= -> =assets/processed/study_cache/train/=):
+         one 32 GB uint8 memmap (4407 x 64 x 336 x 336), raptor preprocessing, copied from the bulk
+         Grad-CAM npz in 35 s.  Test split builds from DICOM with =--split test=.
    - [ ] Fix or drop =src/data/dagster_assets.py=: wrong labels path, zarr v2 API
          (=DirectoryStore= is gone in zarr 3), only processes 5 series.
 
@@ -117,10 +117,33 @@
          still untested (needs Phase 5).
    - [ ] Stage 2 (conditional): classifier on YOLO crops.
 
-** TODO Phase 5: Pipeline B - 2.5D Sequence Model (own training) [0/3]
-   - Current =sequence_transformer.py= trains on random tensors; no pretrained weights.
-   - [ ] Pretrained =timm= backbone (installed) + attention-MIL / transformer over slices.
-   - [ ] Train on soft labels, 5-fold by =StudyInstanceUID=, BF16 + grad checkpointing.
+** TODO Phase 5: Pipeline B - 2.5D Sequence Model (own training) [1/3]
+   - Old =sequence_transformer.py= trains on random tensors; superseded by =src/models/mil25d.py=.
+   - [X] Pretrained =timm= backbone + raptor-style per-label attention-MIL over 3-slice windows
+         (=src/models/mil25d.py=, =--pipeline mil25d=).  GPU augmentation (affine, intensity,
+         flips on coronal/axial only).  ~26 studies/s train at 256 px, K=24 windows.
+   - [ ] Train on soft labels, 5-fold by =StudyInstanceUID=, BF16.
+         - Labels: LLM =v4_blend= (macro AUC vs gold 0.893; =full= 0.878, =v2= 0.887).
+         - Folds: =assets/processed/folds.csv=; the 58 gold studies are fold -1, never trained on.
+         - Fold 0 experiments (=convnext_tiny.fb_in22k_ft_in1k=, 12 epochs; val = 871 studies):
+           | run                   | val vs steven | val vs cons4 | gold  | time   |
+           | 256 px, steven labels |         0.889 |        0.891 | 0.886 | 27 min |
+           | 384 px, steven labels |         0.895 |        0.897 | 0.882 | 76 min |
+           | 256 px, consensus4    |         0.901 |        0.907 | 0.892 | 27 min |
+           Consensus labels (=src/data/labels.py=, mean of 4 public LLM tables, the goodpjw2008
+           reader's recipe) beat 384 px even when scored against the old labels, at no extra cost.
+           384 px: needs =--grad-ckpt= (OOM at 16 GB otherwise), +0.006 for 2.8x time.
+         - Raptor reference: gold 0.920.  The public 0.95 LB notebook is an ensemble (CoaTNet 384 +
+           224-crop + ConvNeXt reader), labels blended from 4+ LLM sources + own extraction + OAI data.
+         - [X] Folds grouped by normalised report text (=make_folds=; 4236 unique reports, 223
+               studies share one; 43 groups were split before).  Checked 28 identical-report pairs:
+               different knees (volume corr <= 0.69), so this is insurance, not a real leak.
+               Old random folds kept as =assets/processed/folds_random_v0.csv=.
+         - [X] 5-fold run =convnext_tiny_cons4_5fold= (256 px, consensus4, 12 epochs, 2.2 h).
+               OOF macro AUC 0.899 (vs consensus4; 0.897 vs steven) on 4349; folds 0.888-0.906.
+               Gold: single folds 0.885-0.897, 5-fold mean 0.899 (raptor 0.920; rank-average with
+               raptor 0.920, no gain).  Weakest on gold: Synovitis 0.73 (the labels themselves only
+               reach 0.80), Lateral OA 0.84, PF OA 0.84, Lateral Meniscus 0.86.
    - [ ] Re-run the Phase 4 Grad-CAM analysis on our own model.
 
 ** TODO Phase 6: Training and Kaggle Inference [0/4]

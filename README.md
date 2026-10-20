@@ -40,9 +40,12 @@ uvx kaggle datasets download -d dreaddevelopment/raptor-knee-maxspan \
 | `src/explain/yolo_dataset.py` | Exports pseudo-boxes as an Ultralytics dataset (2.5D slices, split by study, gold studies in val). |
 | `src/explain/yolo_eval.py` | Tests whether the pseudo-box YOLO helps classification (as a score and as a cropper for raptor). It does not. |
 | `src/data/laterality.py` | Left/right knee per study (vote of DICOM tag, series description, report text, geometry; 99.8% resolved) and the medial image direction per series. |
+| `src/data/study_cache.py` | 32 GB uint8 memmap of every study's 64-slice volume (raptor preprocessing), for training. |
+| `src/data/labels.py` | Soft labels from the public LLM report-label tables; `consensus4` = mean of four sources. |
+| `src/models/mil25d.py` | Phase 5: our own 2.5D attention-MIL classifier (timm backbone on 3-slice windows), 5-fold CV by report group, 58 gold studies held out. |
 | `src/data/extract_2d_slices.py` | Extracts every train series to per-series-normalised PNGs. |
 
-`src/models/` (YOLO cropper, CNN classifier, 2.5D transformer) and
+The older `src/models/` prototypes (YOLO cropper, CNN classifier, 2.5D transformer) and
 `src/data/dagster_assets.py` are **prototype stubs** that still run on random data.
 
 ## CLI
@@ -100,10 +103,23 @@ Laterality (writes `assets/processed/laterality_<split>.csv` and
 uv run python -m src.data.laterality --split train
 ```
 
+Own model (Phase 5).  Label tables need the public CSVs under `custom_labels/`
+(`stevenleehans`, `pilkwang`, `lixin73`, `laymond`; see `src/data/labels.py`):
+
+```sh
+uv run python -m src.data.study_cache --from-npz assets/processed/gradcam_raptor/train_fast
+uv run python -m src.data.labels
+uv run python -m src.models.mil25d --fold all --name convnext_tiny_cons4_5fold   # ~2.2 h
+uv run python -m src.models.mil25d --fold 0 --img 384 --grad-ckpt               # options
+```
+
+Folds (`assets/processed/folds.csv`) are rebuilt deterministically when missing.
+
 Registered pipelines:
 
 ```sh
 uv run python main.py --pipeline raptor_gradcam   # same as the Grad-CAM run with defaults
+uv run python main.py --pipeline mil25d           # fold 0 of the own model with defaults
 ```
 
 ## Findings so far
@@ -115,5 +131,8 @@ uv run python main.py --pipeline raptor_gradcam   # same as the Grad-CAM run wit
 - A YOLO11s trained on 32k pseudo-boxes learns the large findings (Baker's, effusion) but
   does not improve classification: as a score it lowers raptor's AUC when blended, and
   re-centring or zooming raptor's crop on its detections does not help (0.943 -> 0.943 / 0.931).
+
+- Own model (ConvNeXt-T, 256 px, consensus labels): out-of-fold macro AUC 0.899, 5-fold gold
+  0.899 (raptor 0.920).  Consensus labels gained more than 384 px input, at a third of the cost.
 
 Details and numbers: [`TODO.org`](TODO.org), Phase 4.
