@@ -179,6 +179,16 @@
                  the notch; ~1/3 on suprapatellar effusion and ~1/3 on the posterior tibia (lateral
                  side: the pivot-shift bone-bruise pattern).  The model reads secondary signs.  Keep
                  excluded from boxes; interesting as an explanation in itself.
+         - [X] Out-of-fold bulk run: =raptor_gradcam --studies all --fast --model
+               assets/processed/mil_runs/convnext_tiny_cons4_5fold= (each study explained by the fold
+               model that did not train on it; gold -> fold 0; fast maps =L2 LC0=; 0.6 s/study) ->
+               =assets/processed/gradcam_own/train_oof/=, then =pseudo_boxes --region-map L2
+               --point-map LC0 --all-labels=.  Done 2026-10-19: 41 min, 28 GB, no skips; preds
+               reproduce the 5-fold OOF AUC (0.899).  42,692 boxes for 15,642 positives in 3,937
+               studies (Medial Meniscus 2,313 studies, ACL 939 kept but unreliable).
+               Side check over all sagittal boxes (share on the medial half): Medial Meniscus 99.5%
+               (n 6099), Lateral Meniscus 1.0% (2735), Medial OA 98.0%, Lateral OA 5.2%, Baker's
+               99.5%, MCL 86.6%; ACL 18% (lateral bone-bruise pattern).
 
 ** TODO Phase 6: Training and Kaggle Inference [0/4]
    - [ ] Restrict =num_workers= to avoid starving the GPU.

@@ -33,7 +33,9 @@ Usage:
         --model assets/processed/mil_runs/convnext_tiny_cons4_5fold/fold0/best.pt \\
         --reuse assets/processed/gradcam_raptor/gold_multi --out DIR   # own model
 
-``--model``: ``raptor`` or a ``mil25d`` checkpoint.  Stage grids depend on the
+``--model``: ``raptor``, a ``mil25d`` checkpoint, or a ``mil25d`` run directory
+(``fold*/best.pt``): each study is then explained by the fold model that did
+not train on it (gold studies, never trained on: fold 0).  Stage grids depend on the
 backbone and input size: raptor CoaTNet at 384 px has stages 1-3 = 48/24/12;
 ConvNeXt-T at 256 px has stages 0-3 = 64/32/16/8.
 """
@@ -62,7 +64,8 @@ LLM_LABELS = (raptor.DATA_DIR / "custom_labels/slh/kneelabels-stevenleehans"
               / "llm_labels_full.csv")
 OUT_DIR = Path("assets/processed/gradcam_raptor")
 DEFAULT_MAPS = ["L3", "L2", "L1", "L1+L2"]
-FAST_MAPS = ["L3", "LC1+L3"]  # what src.explain.pseudo_boxes uses
+FAST_MAPS = ["L3", "LC1+L3"]  # what src.explain.pseudo_boxes uses (region map first)
+FAST_MAPS_OWN = ["L2", "LC0"]  # ConvNeXt-T 256 px: 16x16 region, 64x64 point
 
 
 # --------------------------------------------------------------------------- #
@@ -481,6 +484,15 @@ def load_explained(spec, device):
     return model.eval().to(device), windows
 
 
+def load_out_of_fold(run_dir, device):
+    """{fold: (model, windows)} for a mil25d run dir, and the study -> fold map."""
+    from src.models.mil25d import FOLDS_CSV
+    models = {int(p.parent.name[4:]): load_explained(str(p), device)
+              for p in sorted(Path(run_dir).glob("fold*/best.pt"))}
+    folds = pd.read_csv(FOLDS_CSV).set_index("StudyInstanceUID").fold
+    return models, folds.where(folds >= 0, 0).to_dict()
+
+
 def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
         reuse=None, seed=0, fast=False, llm_thr=0.7, model_spec="raptor"):
     """Grad-CAM over ``studies``.
@@ -493,7 +505,8 @@ def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
     """
     out_dir = Path(out_dir)
     (out_dir / "studies").mkdir(parents=True, exist_ok=True)
-    maps = list(maps or (FAST_MAPS if fast else DEFAULT_MAPS))
+    own = model_spec != "raptor"
+    maps = list(maps or ((FAST_MAPS_OWN if own else FAST_MAPS) if fast else DEFAULT_MAPS))
     _, layers = parse_maps(maps)
     (out_dir / "meta.json").write_text(json.dumps(
         {"maps": maps, "frac": frac, "fast": fast, "llm_thr": llm_thr, "model": model_spec}))
@@ -501,7 +514,10 @@ def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
     train, gold, llm = _load_tables()
     uids = select_studies(studies, train, gold, seed)
     todo = [u for u in uids if not (out_dir / "studies" / f"{u}.npz").exists()] if fast else uids
-    model, windows = load_explained(model_spec, device)
+    if Path(model_spec).is_dir():
+        fold_models, fold_of = load_out_of_fold(model_spec, device)
+    else:
+        fold_models, fold_of = {0: load_explained(model_spec, device)}, {}
     print(f"{len(uids)} studies ({len(uids) - len(todo)} already done) | maps {maps} | "
           f"{'fast' if fast else 'full'} | device {device}", flush=True)
 
@@ -518,6 +534,8 @@ def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
                 print(f"  skip {uid[-12:]}: {err}", flush=True)
                 continue
             centers = raptor.eval_centers(mask)
+            fold = fold_of.get(uid, 0)
+            model, windows = fold_models[fold]
             x = windows(vol, centers).to(device)
             try:
                 probs, attn, base = gradcam(model, x, layers)
@@ -530,9 +548,8 @@ def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
             if fast:
                 keep = np.zeros(len(raptor.LABELS), bool)
                 keep[_positive_labels(uid, gold, llm, llm_thr)] = True
-                for m in maps:
-                    if m != "L3":
-                        out[m][~keep] = 0  # zeros compress to almost nothing
+                for m in maps[1:]:  # the region map (first) is kept for every label
+                    out[m][~keep] = 0  # zeros compress to almost nothing
             else:
                 test_labels = [n for n, lab in enumerate(raptor.LABELS)
                                if probs[n] >= 0.3 or (g is not None and g[lab] == 1)]
@@ -540,7 +557,7 @@ def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
                     del_rows.append({"study": uid, **r})
             np.savez_compressed(
                 out_dir / "studies" / f"{uid}.npz", vol=vol, mask=mask, centers=centers,
-                probs=probs, attn=attn, slot_series=np.array([s or "" for s in slot_series]),
+                probs=probs, attn=attn, fold=fold, slot_series=np.array([s or "" for s in slot_series]),
                 **{f"cams_{k}": v.astype(np.float16) for k, v in out.items()})
             if not fast or (i + 1) % 25 == 0 or i + 1 == len(todo):
                 rate = (time.time() - t0) / (i + 1)
