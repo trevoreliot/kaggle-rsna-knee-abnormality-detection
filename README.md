@@ -75,6 +75,17 @@ uv run python -m src.explain.raptor_gradcam --studies all --fast \
     --out assets/processed/gradcam_raptor/train_fast
 ```
 
+Grad-CAM on our own model (fold 0 never trained on the gold studies; ConvNeXt-T at 256 px
+has stage grids 0-3 = 64/32/16/8), then boxes from its 16x16 region and 64x64 point maps:
+
+```sh
+uv run python -m src.explain.raptor_gradcam --studies gold --maps L2 L1 LC0 LC1+L2 \
+    --model assets/processed/mil_runs/convnext_tiny_cons4_5fold/fold0/best.pt \
+    --reuse assets/processed/gradcam_raptor/gold_multi --out assets/processed/gradcam_own/gold_cons4_f0
+uv run python -m src.explain.pseudo_boxes --src assets/processed/gradcam_own/gold_cons4_f0 \
+    --region-map L2 --point-map LC0 --all-labels --eval
+```
+
 Pseudo-boxes from a Grad-CAM output directory that has `L3` and `LC1+L3` maps:
 
 ```sh
@@ -134,5 +145,9 @@ uv run python main.py --pipeline mil25d           # fold 0 of the own model with
 
 - Own model (ConvNeXt-T, 256 px, consensus labels): out-of-fold macro AUC 0.899, 5-fold gold
   0.899 (raptor 0.920).  Consensus labels gained more than 384 px input, at a third of the cost.
+- Grad-CAM on the own model (`raptor_gradcam --model <best.pt>`): 16x16 maps 100% faithful
+  (raptor 12x12: 92%); pseudo-boxes beat random boxes for all 12 labels, and medial meniscus
+  boxes land on the medial meniscus (64/64 on the medial half).  ACL boxes follow secondary
+  signs (effusion, lateral bone bruise) rather than the ligament.
 
 Details and numbers: [`TODO.org`](TODO.org), Phase 4.

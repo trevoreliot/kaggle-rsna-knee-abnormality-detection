@@ -1,4 +1,5 @@
-"""Grad-CAM on the public raptor CoaTNet model, at several depths plus an ensemble.
+"""Grad-CAM on the public raptor CoaTNet model (or our own ``mil25d`` checkpoint),
+at several depths plus an ensemble.
 
 For every study: per-label probabilities, per-label slice attention, and a
 Grad-CAM map for every (label, window) at each requested CoaTNet stage
@@ -28,6 +29,13 @@ Usage:
     uv run python -m src.explain.raptor_gradcam --out DIR --gallery-only
     uv run python -m src.explain.raptor_gradcam --studies all --fast \\
         --out assets/processed/gradcam_raptor/train_fast      # bulk, resumable
+    uv run python -m src.explain.raptor_gradcam --studies gold --maps L2 L1 LC1 \\
+        --model assets/processed/mil_runs/convnext_tiny_cons4_5fold/fold0/best.pt \\
+        --reuse assets/processed/gradcam_raptor/gold_multi --out DIR   # own model
+
+``--model``: ``raptor`` or a ``mil25d`` checkpoint.  Stage grids depend on the
+backbone and input size: raptor CoaTNet at 384 px has stages 1-3 = 48/24/12;
+ConvNeXt-T at 256 px has stages 0-3 = 64/32/16/8.
 """
 
 import argparse
@@ -81,7 +89,12 @@ def _tail(model, h, start):
     bb = model.backbone
     for stage in bb.stages[start:]:
         h = stage(h)
-    return bb.head(bb.norm(h))
+    return _pool(bb, h)
+
+
+def _pool(bb, h):
+    """Final norm + global pool + head norm (CoaTNet: ``norm``; ConvNeXt: ``norm_pre``)."""
+    return bb.head(bb.norm(h) if hasattr(bb, "norm") else bb.norm_pre(h))
 
 
 def parse_maps(specs):
@@ -93,7 +106,7 @@ def parse_maps(specs):
     bases = []
     for spec in specs:
         for b in spec.split("+"):
-            if not re.fullmatch(r"LC?[123]", b):
+            if not re.fullmatch(r"LC?[0-3]", b):
                 raise ValueError(f"bad map spec {b!r} in {spec!r}")
             if b not in bases:
                 bases.append(b)
@@ -138,7 +151,7 @@ def gradcam(model, x, layers, chunk=8):
             for i in range(lo + 1, len(bb.stages)):
                 h = bb.stages[i](h)
                 acts[i] = h
-            fc = bb.head(bb.norm(h)).float()
+            fc = _pool(bb, h).float()
         targets = [acts[l] for l in layers]
         per_label = []
         for n in range(n_lab):
@@ -173,7 +186,7 @@ def ensemble(cams, names):
 def _logits(model, x):
     h = _no_grad_trunk(model, x, len(model.backbone.stages))
     with _amp():
-        feats = model.backbone.head(model.backbone.norm(h)).float()[None]
+        feats = _pool(model.backbone, h).float()[None]
     return model.head(feats)[0]
 
 
@@ -449,8 +462,27 @@ def _write_preds(out_dir, uids, gold, llm):
     return len(rows) // len(raptor.LABELS)
 
 
+def load_explained(spec, device):
+    """(model, windows fn): ``raptor`` or a ``src.models.mil25d`` checkpoint path."""
+    if spec == "raptor":
+        return raptor.load_model(device), raptor.eval_windows
+    from src.models import mil25d
+    ck = torch.load(spec, map_location="cpu", weights_only=True)
+    a = ck["args"]
+    model = mil25d.build_model(a["backbone"], pretrained=False)
+    model.load_state_dict(ck["model"])
+    img = a["img"]
+
+    def windows(vol, centers):
+        idx = np.clip(np.asarray(centers)[:, None] + np.arange(-1, 2), 0, len(vol) - 1)
+        x = torch.from_numpy(vol[idx])[None]
+        return mil25d.prepare(x, torch.from_numpy(np.asarray(centers))[None], img, augment=False)
+
+    return model.eval().to(device), windows
+
+
 def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
-        reuse=None, seed=0, fast=False, llm_thr=0.7):
+        reuse=None, seed=0, fast=False, llm_thr=0.7, model_spec="raptor"):
     """Grad-CAM over ``studies``.
 
     ``reuse``: a previous output dir whose saved study volumes replace DICOM reads.
@@ -464,12 +496,12 @@ def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
     maps = list(maps or (FAST_MAPS if fast else DEFAULT_MAPS))
     _, layers = parse_maps(maps)
     (out_dir / "meta.json").write_text(json.dumps(
-        {"maps": maps, "frac": frac, "fast": fast, "llm_thr": llm_thr}))
+        {"maps": maps, "frac": frac, "fast": fast, "llm_thr": llm_thr, "model": model_spec}))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train, gold, llm = _load_tables()
     uids = select_studies(studies, train, gold, seed)
     todo = [u for u in uids if not (out_dir / "studies" / f"{u}.npz").exists()] if fast else uids
-    model = raptor.load_model(device)
+    model, windows = load_explained(model_spec, device)
     print(f"{len(uids)} studies ({len(uids) - len(todo)} already done) | maps {maps} | "
           f"{'fast' if fast else 'full'} | device {device}", flush=True)
 
@@ -486,7 +518,7 @@ def run(studies="gold", maps=None, frac=0.05, workers=6, out_dir=OUT_DIR,
                 print(f"  skip {uid[-12:]}: {err}", flush=True)
                 continue
             centers = raptor.eval_centers(mask)
-            x = raptor.eval_windows(vol, centers).to(device)
+            x = windows(vol, centers).to(device)
             try:
                 probs, attn, base = gradcam(model, x, layers)
             except torch.OutOfMemoryError:
@@ -540,11 +572,12 @@ def main():
                          "an integer N (random non-gold studies), or a file of UIDs")
     ap.add_argument("--maps", nargs="+", default=None,
                     help="maps to compute: L<k> Grad-CAM or LC<k> LayerCAM at stage k "
-                         "(1: 48x48, 2: 24x24, 3: 12x12); join with + for a "
+                         "(raptor 1-3: 48/24/12; ConvNeXt-T 256 px 0-3: 64/32/16/8); join with + for a "
                          "geometric-mean ensemble, e.g. LC1+L3")
     ap.add_argument("--frac", type=float, default=0.05,
                     help="fraction of pixels blurred in the deletion test")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--model", default="raptor", help="'raptor' or a mil25d checkpoint (best.pt)")
     ap.add_argument("--out", default=str(OUT_DIR))
     ap.add_argument("--reuse", help="earlier output dir to load study volumes from")
     ap.add_argument("--gallery-only", action="store_true")
@@ -558,7 +591,7 @@ def main():
         print(build_gallery(a.out))
     else:
         run(a.studies, a.maps, a.frac, a.workers, a.out, a.reuse, fast=a.fast,
-            llm_thr=a.llm_thr)
+            llm_thr=a.llm_thr, model_spec=a.model)
 
 
 if __name__ == "__main__":

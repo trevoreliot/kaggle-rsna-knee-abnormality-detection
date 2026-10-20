@@ -40,7 +40,7 @@ import torch
 from torchvision.transforms.functional import gaussian_blur
 
 from src.explain import raptor
-from src.explain.raptor_gradcam import _CSS, _auc, _logits, _overlay
+from src.explain.raptor_gradcam import _CSS, _auc, _logits, _overlay, load_explained
 
 MM_PER_PX = raptor.CROP_MM / raptor.IMG
 
@@ -146,15 +146,17 @@ def tissue_mask(slice_u8, dilate_mm=5.0):
 
 def boxes_for_label(z, n, region_map, point_map, top_windows=3, min_rel_peak=0.35,
                     region_thr=0.5, point_thr=0.3, sigma_mm=3.0, dilate_mm=4.0,
-                    min_side_mm=10.0, slots=None):
+                    min_side_mm=10.0, slots=None, corner=True):
     """Pseudo-box rows for label index ``n`` of one study npz.
 
     ``slots``: optional slot indices (into ``raptor.SLOTS``) the boxes may come
     from; windows are then ranked, and the weak-window check normalised, within
     those slots only.
     """
-    reg = suppress_corner(z[f"cams_{region_map}"][n].astype(np.float32))
-    pnt = suppress_corner(z[f"cams_{point_map}"][n].astype(np.float32))
+    reg = z[f"cams_{region_map}"][n].astype(np.float32)
+    pnt = z[f"cams_{point_map}"][n].astype(np.float32)
+    if corner:  # CoaTNet-only artefact
+        reg, pnt = suppress_corner(reg), suppress_corner(pnt)
     attn, centers, vol = z["attn"][:, n].copy(), z["centers"], z["vol"]
     if slots is not None:
         allowed = np.isin(raptor.SLOT_OF_SLICE[centers], list(slots))
@@ -205,10 +207,17 @@ def positives(preds, source, llm_thr):
     return preds[keep]
 
 
+def _model_spec(src):
+    return json.loads((Path(src) / "meta.json").read_text()).get("model", "raptor")
+
+
 def generate(src, region_map="L3", point_map="LC1+L3", source="gold_or_llm",
-             llm_thr=0.7, **kw):
+             llm_thr=0.7, labels=None, **kw):
     src = Path(src)
+    kw.setdefault("corner", _model_spec(src) == "raptor")
     preds = pd.read_csv(src / "preds.csv", dtype={"study": str})
+    if labels:
+        preds = preds[preds.label.isin(labels)]
     rows = []
     for study, grp in positives(preds, source, llm_thr).groupby("study", sort=False):
         z = np.load(src / "studies" / f"{study}.npz", allow_pickle=False)
@@ -254,14 +263,14 @@ def evaluate(src, boxes, n_random=3, seed=0):
     """Per (study, label): logit drop for blurring own boxes vs random boxes."""
     src = Path(src)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = raptor.load_model(device)
-    scale = raptor.RES / raptor.IMG
+    model, windows = load_explained(_model_spec(src), device)
     rng = np.random.default_rng(seed)
     out = []
     for study, sb in boxes.groupby("study", sort=False):
         z = np.load(src / "studies" / f"{study}.npz", allow_pickle=False)
         vol = z["vol"]
-        x = raptor.eval_windows(vol, z["centers"]).to(device)
+        x = windows(vol, z["centers"]).to(device)
+        scale = x.shape[-1] / raptor.IMG  # box coords are on the 336 px crop
         x_blur = gaussian_blur(x, kernel_size=61, sigma=15.0)
         base = _logits(model, x)
 
@@ -359,7 +368,9 @@ def build_report(src, boxes, scores, region_map, out_path, per_label=8):
         for r in lb.itertuples():
             z = np.load(src / "studies" / f"{r.study}.npz", allow_pickle=False)
             n = raptor.LABELS.index(label)
-            reg = suppress_corner(z[f"cams_{region_map}"][n].astype(np.float32))
+            reg = z[f"cams_{region_map}"][n].astype(np.float32)
+            if _model_spec(src) == "raptor":
+                reg = suppress_corner(reg)
             parts.append(
                 f"<figure><img src='data:image/jpeg;base64,"
                 f"{_draw(z['vol'][r.slice], reg[r.window] / (reg.max() + 1e-8), r)}'>"
@@ -384,6 +395,7 @@ def main():
     ap.add_argument("--eval", action="store_true", help="score boxes against the model")
     ap.add_argument("--all-labels", action="store_true",
                     help="ignore BOX_LEVEL exclusions (for re-tuning the label table)")
+    ap.add_argument("--labels", nargs="+", help="only these labels (e.g. ACL 'Medial Meniscus')")
     ap.add_argument("--out", help="output dir (default: <src>/boxes)")
     a = ap.parse_args()
 
@@ -396,7 +408,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     if a.all_labels:
         BOX_LEVEL.update({k: v or "t" for k, v in BOX_LEVEL.items()})
-    boxes = generate(src, a.region_map, a.point_map, a.positives, a.llm_thr,
+    boxes = generate(src, a.region_map, a.point_map, a.positives, a.llm_thr, a.labels,
                      top_windows=a.top_windows, region_thr=a.region_thr,
                      point_thr=a.point_thr, min_side_mm=a.min_side_mm)
     boxes.to_csv(out / "pseudo_boxes.csv", index=False)

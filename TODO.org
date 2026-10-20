@@ -117,12 +117,12 @@
          still untested (needs Phase 5).
    - [ ] Stage 2 (conditional): classifier on YOLO crops.
 
-** TODO Phase 5: Pipeline B - 2.5D Sequence Model (own training) [1/3]
+** TODO Phase 5: Pipeline B - 2.5D Sequence Model (own training) [2/3]
    - Old =sequence_transformer.py= trains on random tensors; superseded by =src/models/mil25d.py=.
    - [X] Pretrained =timm= backbone + raptor-style per-label attention-MIL over 3-slice windows
          (=src/models/mil25d.py=, =--pipeline mil25d=).  GPU augmentation (affine, intensity,
          flips on coronal/axial only).  ~26 studies/s train at 256 px, K=24 windows.
-   - [ ] Train on soft labels, 5-fold by =StudyInstanceUID=, BF16.
+   - [X] Train on soft labels, 5-fold by =StudyInstanceUID=, BF16.
          - Labels: LLM =v4_blend= (macro AUC vs gold 0.893; =full= 0.878, =v2= 0.887).
          - Folds: =assets/processed/folds.csv=; the 58 gold studies are fold -1, never trained on.
          - Fold 0 experiments (=convnext_tiny.fb_in22k_ft_in1k=, 12 epochs; val = 871 studies):
@@ -144,7 +144,41 @@
                Gold: single folds 0.885-0.897, 5-fold mean 0.899 (raptor 0.920; rank-average with
                raptor 0.920, no gain).  Weakest on gold: Synovitis 0.73 (the labels themselves only
                reach 0.80), Lateral OA 0.84, PF OA 0.84, Lateral Meniscus 0.86.
-   - [ ] Re-run the Phase 4 Grad-CAM analysis on our own model.
+   - [-] Re-run the Phase 4 Grad-CAM analysis on our own model
+         (=raptor_gradcam --model <fold0 best.pt>= -> =assets/processed/gradcam_own/gold_cons4_f0/=;
+         fold 0 never saw the 58 gold studies).  ConvNeXt-T 256 px grids: L3 8, L2 16, L1 32, L0 64.
+         | map                    | faithful | blob | note                         |
+         | raptor L3 12x12        |      92% | 0.72 | reference                    |
+         | raptor LC1+L3          |      97% | 0.24 |                              |
+         | own L2 16x16           |     100% | 0.49 | like-for-like with raptor L3 |
+         | own L1+L2              |      99% | 0.36 |                              |
+         | own LC1+L2             |      95% | 0.29 |                              |
+         | own LC0 64x64          |      85% | 0.54 | finest, still faithful       |
+         | own L3 8x8             |     100% | 1.00 | too coarse (17 mm cells)     |
+         (n = 369 label-study pairs vs raptor 535: the test set is labels with prob >= 0.3 or gold.)
+         - Visually: ACL maps sit in the intercondylar notch / tibial insertion (raptor: posterior
+           soft tissue); Medial Meniscus LC0 on the posterior horn (raptor: femoral condyle);
+           Baker's on the posteromedial axial recess.  Own model favours axial for Effusion / Baker's.
+         - Side check (coronal/axial top windows, gold positives): own LC1+L2 medial for MCL 90%,
+           Medial OA 86%, Medial Meniscus 92%; own L2 alone is weaker (67 / 50 / 75%); Fracture
+           lateral only 55-64% (raptor 93%).  Small n (11-29).
+         - [X] Pseudo-boxes from own maps (region L2 16x16, point LC0 64x64 or LC1+L2;
+               =pseudo_boxes= now scores with the model in the run's =meta.json=).  Box vs random-box
+               win rate, region / tight (LC0), own vs raptor:
+               | ACL              | 83 / 92 | raptor 57 / 52 |
+               | Medial Meniscus  | 100 / 92 | raptor 46 / 62 |
+               | PF OA            | 90 / 95 | raptor 48 / 81 |
+               | Lateral Meniscus | 91 / 91 | raptor 70 / 87 |
+               | others           | 84-100  | raptor 73-100  |
+               Logit drops are large (median 0.3 for ACL / MM vs 0.014 for raptor MM).
+               - Side check, sagittal boxes (slice position x medial_sign): Medial Meniscus 64/64 on
+                 the medial half, Lateral Meniscus 0/62, Medial OA 31/31, Lateral OA 0/28.
+               - Medial Meniscus: ~12/16 top boxes on the joint line / posterior horn visually
+                 (raptor ~1/3).  Usable.
+               - ACL: central sagittal slices (as expected for the notch) but in-plane only ~1/3 on
+                 the notch; ~1/3 on suprapatellar effusion and ~1/3 on the posterior tibia (lateral
+                 side: the pivot-shift bone-bruise pattern).  The model reads secondary signs.  Keep
+                 excluded from boxes; interesting as an explanation in itself.
 
 ** TODO Phase 6: Training and Kaggle Inference [0/4]
    - [ ] Restrict =num_workers= to avoid starving the GPU.
