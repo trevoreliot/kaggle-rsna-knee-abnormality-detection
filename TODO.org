@@ -156,7 +156,10 @@
                ConvNeXt-S gains on ACL / MCL; EMA steady across epochs, best gold; the label
                co-occurrence GCN (ML-GCN style, tau 0.3) helps Fracture, not Synovitis.  Train loss
                keeps falling while val stalls: label noise is the ceiling.
-         - [-] 5-fold =convnext_small_ema_5fold= (ConvNeXt-S + EMA 0.999, 256 px, consensus4).
+         - [X] 5-fold =convnext_small_ema_5fold= (ConvNeXt-S + EMA 0.999, 256 px, consensus4; 4.3 h).
+               OOF 0.9013 (T baseline 0.8994), folds 0.894-0.907; gold 5-fold mean 0.906 (0.899).
+               Gains on ACL / MCL / Lateral Meniscus / Effusion (gold); Synovitis still 0.73 on gold.
+               Ensemble T + S (equal weight): OOF 0.9045, gold 0.904.  Best OOF so far.
    - [-] Re-run the Phase 4 Grad-CAM analysis on our own model
          (=raptor_gradcam --model <fold0 best.pt>= -> =assets/processed/gradcam_own/gold_cons4_f0/=;
          fold 0 never saw the 58 gold studies).  ConvNeXt-T 256 px grids: L3 8, L2 16, L1 32, L0 64.
