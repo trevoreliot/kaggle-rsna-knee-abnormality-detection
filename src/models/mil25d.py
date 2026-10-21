@@ -35,6 +35,7 @@ import pandas as pd
 import timm
 import torch
 import torch.nn.functional as F
+from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from src.data.study_cache import StudyCache
@@ -161,12 +162,50 @@ def prepare(x, centers, img, augment, gen=None):
 # --------------------------------------------------------------------------- #
 # Model
 # --------------------------------------------------------------------------- #
-def build_model(backbone, pretrained=True, grad_ckpt=False, drop_path=0.1):
+class LabelGraphClassifier(raptor.RaptorClassifier):
+    """Attention-MIL head plus a 2-layer GCN over the 12 per-label pooled features.
+
+    Nodes are the label-specific attention-pooled study features; edges are
+    label co-occurrence on the training fold (ML-GCN style: conditional
+    probability P(j | i), thresholded, row-normalised, plus self loops).  The
+    GCN is residual with a zero-initialised output layer, so training starts
+    from the plain MIL head.
+    """
+
+    def __init__(self, backbone, f_dim=768, n=12, drop=0.2, hidden=256):
+        super().__init__(backbone, f_dim, n, drop)
+        self.register_buffer("adj", torch.eye(n))
+        self.g1 = nn.Linear(f_dim, hidden)
+        self.g2 = nn.Linear(hidden, f_dim)
+        nn.init.zeros_(self.g2.weight)
+        nn.init.zeros_(self.g2.bias)
+
+    def head(self, feats):
+        h = self.norm(feats)
+        a = torch.softmax(self.att(h), dim=1)
+        pooled = torch.einsum("bkn,bkf->bnf", a, h)
+        z = F.gelu(self.adj @ self.g1(pooled))
+        pooled = pooled + self.adj @ self.g2(z)
+        return (pooled * self.clsW).sum(-1) + self.clsb
+
+
+def label_adjacency(y, tau=0.3):
+    """Row-normalised co-occurrence graph from soft labels (studies x labels)."""
+    b = (np.asarray(y) >= 0.5).astype(np.float64)
+    co = b.T @ b
+    cond = co / np.maximum(np.diag(co)[:, None], 1)  # P(j | i)
+    np.fill_diagonal(cond, 0)
+    adj = (cond >= tau).astype(np.float64) + np.eye(len(cond))
+    return torch.tensor(adj / adj.sum(1, keepdims=True), dtype=torch.float32)
+
+
+def build_model(backbone, pretrained=True, grad_ckpt=False, drop_path=0.1, head="mil"):
     bb = timm.create_model(backbone, pretrained=pretrained, num_classes=0, global_pool="avg",
                            drop_path_rate=drop_path)
     if grad_ckpt:
         bb.set_grad_checkpointing(True)
-    return raptor.RaptorClassifier(bb, f_dim=bb.num_features)
+    cls = LabelGraphClassifier if head == "graph" else raptor.RaptorClassifier
+    return cls(bb, f_dim=bb.num_features)
 
 
 def forward(model, x, b, k):
@@ -217,7 +256,12 @@ def train_fold(fold, a, cache, llm, gold, folds, device):
     va_dl = DataLoader(StudyWindows(cache, va_ids, llm), batch_size=4, **kw)
     go_dl = DataLoader(StudyWindows(cache, go_ids, None), batch_size=4, **kw)
 
-    model = build_model(a.backbone, grad_ckpt=a.grad_ckpt).to(device).to(memory_format=torch.channels_last)
+    model = build_model(a.backbone, grad_ckpt=a.grad_ckpt, head=a.head)
+    if a.head == "graph":
+        model.adj.copy_(label_adjacency(llm.loc[tr_ids].to_numpy(), a.graph_tau))
+        print("label graph edges:", {LABELS[i]: [LABELS[j] for j in np.flatnonzero(r) if j != i]
+                                     for i, r in enumerate(model.adj.numpy())})
+    model = model.to(device).to(memory_format=torch.channels_last)
     head = [p for n, p in model.named_parameters() if not n.startswith("backbone.")]
     opt = torch.optim.AdamW([{"params": model.backbone.parameters(), "lr": a.lr},
                              {"params": head, "lr": a.lr * 10}], weight_decay=a.wd)
@@ -226,6 +270,10 @@ def train_fold(fold, a, cache, llm, gold, folds, device):
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: (s + 1) / warm if s < warm else 0.5 * (1 + math.cos(math.pi * (s - warm) / max(1, steps - warm))))
 
+    ema = None
+    if a.ema:  # evaluated and saved in place of the raw weights
+        ema = torch.optim.swa_utils.AveragedModel(
+            model, multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(a.ema))
     best, log = -1.0, []
     for ep in range(a.epochs):
         model.train()
@@ -242,14 +290,17 @@ def train_fold(fold, a, cache, llm, gold, folds, device):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 2.0)
             opt.step()
             sched.step()
+            if ema is not None:
+                ema.update_parameters(model)
             tot, n = tot + loss.item() * len(y), n + len(y)
             if i % 100 == 0:
                 print(f"  ep {ep} it {i}/{len(tr_dl)} loss {tot / n:.4f} "
                       f"{n / (time.time() - t0):.1f} studies/s", flush=True)
         t_train = time.time() - t0
-        p_va = predict(model, va_dl, a.img, device)
+        ev = model if ema is None else ema.module
+        p_va = predict(ev, va_dl, a.img, device)
         auc_va, _ = macro_auc(llm.loc[va_ids].to_numpy(), p_va)
-        p_go = predict(model, go_dl, a.img, device)
+        p_go = predict(ev, go_dl, a.img, device)
         auc_go, _ = macro_auc(gold.loc[go_ids].to_numpy(), p_go, soft=False)
         row = dict(epoch=ep, loss=tot / n, val_auc_llm=auc_va, gold_auc=auc_go,
                    train_s=round(t_train), total_s=round(time.time() - t0))
@@ -259,7 +310,7 @@ def train_fold(fold, a, cache, llm, gold, folds, device):
         pd.DataFrame(log).to_csv(out / "log.csv", index=False)
         if auc_va > best:  # select on the fold's own val split, never on gold
             best = auc_va
-            torch.save({"model": model.state_dict(), "args": vars(a), "epoch": ep}, out / "best.pt")
+            torch.save({"model": ev.state_dict(), "args": vars(a), "epoch": ep}, out / "best.pt")
             pd.DataFrame(p_va, index=pd.Index(va_ids, name="StudyInstanceUID"), columns=LABELS).to_csv(out / "oof.csv")
             pd.DataFrame(p_go, index=pd.Index(go_ids, name="StudyInstanceUID"), columns=LABELS).to_csv(out / "gold.csv")
     (out / "best.json").write_text(json.dumps({"val_auc_llm": best, **log[int(np.argmax([r["val_auc_llm"] for r in log]))]}))
@@ -294,6 +345,10 @@ def parse_args(argv=None):
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--wd", type=float, default=0.05)
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--head", default="mil", choices=["mil", "graph"],
+                    help="graph = label co-occurrence GCN on the pooled features")
+    ap.add_argument("--graph-tau", type=float, default=0.3, help="edge threshold on P(j | i)")
+    ap.add_argument("--ema", type=float, default=0.0, help="EMA decay per step (0 = off)")
     ap.add_argument("--grad-ckpt", action="store_true")
     ap.add_argument("--limit", type=int, default=0, help="train on N studies (smoke test)")
     ap.add_argument("--out", default=str(OUT_DIR))

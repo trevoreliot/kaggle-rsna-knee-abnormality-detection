@@ -144,6 +144,19 @@
                Gold: single folds 0.885-0.897, 5-fold mean 0.899 (raptor 0.920; rank-average with
                raptor 0.920, no gain).  Weakest on gold: Synovitis 0.73 (the labels themselves only
                reach 0.80), Lateral OA 0.84, PF OA 0.84, Lateral Meniscus 0.86.
+         - [X] OOF improvement round (2026-10-20), fold 0 of the grouped folds (val 870), baseline
+               =convnext_tiny_cons4_5fold= fold 0:
+               | run                         | val    | delta   | gold  | time   |
+               | baseline ConvNeXt-T 256     | 0.9059 |         | 0.892 | 27 min |
+               | mirror TTA (no retrain)     |        | +0.0003 OOF (all 5 folds) | | |
+               | EMA 0.999 (=--ema=)         | 0.9084 | +0.0025 | 0.902 | 27 min |
+               | ConvNeXt-S                  | 0.9112 | +0.0053 | 0.892 | 52 min |
+               | 384 px                      | 0.9057 |  0.0000 | 0.899 | 76 min |
+               | label-graph GCN (=--head graph=) | 0.9080 | +0.0021 | 0.891 | 27 min |
+               ConvNeXt-S gains on ACL / MCL; EMA steady across epochs, best gold; the label
+               co-occurrence GCN (ML-GCN style, tau 0.3) helps Fracture, not Synovitis.  Train loss
+               keeps falling while val stalls: label noise is the ceiling.
+         - [-] 5-fold =convnext_small_ema_5fold= (ConvNeXt-S + EMA 0.999, 256 px, consensus4).
    - [-] Re-run the Phase 4 Grad-CAM analysis on our own model
          (=raptor_gradcam --model <fold0 best.pt>= -> =assets/processed/gradcam_own/gold_cons4_f0/=;
          fold 0 never saw the 58 gold studies).  ConvNeXt-T 256 px grids: L3 8, L2 16, L1 32, L0 64.

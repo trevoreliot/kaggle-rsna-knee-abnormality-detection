@@ -472,7 +472,7 @@ def load_explained(spec, device):
     from src.models import mil25d
     ck = torch.load(spec, map_location="cpu", weights_only=True)
     a = ck["args"]
-    model = mil25d.build_model(a["backbone"], pretrained=False)
+    model = mil25d.build_model(a["backbone"], pretrained=False, head=a.get("head", "mil"))
     model.load_state_dict(ck["model"])
     img = a["img"]
 
