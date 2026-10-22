@@ -240,7 +240,9 @@ def macro_auc(y, p, soft=True):
 # --------------------------------------------------------------------------- #
 # Training
 # --------------------------------------------------------------------------- #
-def train_fold(fold, a, cache, llm, gold, folds, device):
+def train_fold(fold, a, cache, llm, gold, folds, device, val_ref=None):
+    """``llm``: training targets; ``val_ref``: soft labels the val split is scored against."""
+    val_ref = llm if val_ref is None else val_ref
     out = Path(a.out) / a.name / f"fold{fold}"
     out.mkdir(parents=True, exist_ok=True)
     tr_ids = folds.index[(folds != fold) & (folds >= 0)].tolist()
@@ -299,7 +301,7 @@ def train_fold(fold, a, cache, llm, gold, folds, device):
         t_train = time.time() - t0
         ev = model if ema is None else ema.module
         p_va = predict(ev, va_dl, a.img, device)
-        auc_va, _ = macro_auc(llm.loc[va_ids].to_numpy(), p_va)
+        auc_va, _ = macro_auc(val_ref.loc[va_ids].to_numpy(), p_va)
         p_go = predict(ev, go_dl, a.img, device)
         auc_go, _ = macro_auc(gold.loc[go_ids].to_numpy(), p_go, soft=False)
         row = dict(epoch=ep, loss=tot / n, val_auc_llm=auc_va, gold_auc=auc_go,
@@ -338,6 +340,7 @@ def parse_args(argv=None):
     ap.add_argument("--name", default="convnext_tiny_cons4")
     ap.add_argument("--backbone", default="convnext_tiny.fb_in22k_ft_in1k")
     ap.add_argument("--labels", default="consensus4", help="assets/processed/labels_<name>.csv")
+    ap.add_argument("--eval-labels", default="consensus4", help="labels the val split is scored against")
     ap.add_argument("--img", type=int, default=256)
     ap.add_argument("--k-train", type=int, default=24, help="windows sampled per study when training")
     ap.add_argument("--batch", type=int, default=4, help="studies per step")
@@ -359,16 +362,17 @@ def parse_args(argv=None):
 def run(a):
     torch.backends.cudnn.benchmark = True
     llm, gold = load_labels(a.labels)
+    val_ref, _ = load_labels(a.eval_labels)
     if a.summarize:
-        return summarize(Path(a.out) / a.name, llm, gold)
+        return summarize(Path(a.out) / a.name, val_ref, gold)
     cache = StudyCache("train")
     folds = make_folds(cache.uids, gold)
     device = torch.device("cuda")
     todo = range(N_FOLDS) if a.fold == "all" else [int(a.fold)]
     for k in todo:
-        train_fold(k, a, cache, llm, gold, folds, device)
+        train_fold(k, a, cache, llm, gold, folds, device, val_ref)
     if a.fold == "all":
-        summarize(Path(a.out) / a.name, llm, gold)
+        summarize(Path(a.out) / a.name, val_ref, gold)
 
 
 @register_model("mil25d")

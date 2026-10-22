@@ -226,8 +226,8 @@ def load_member(path, cfg, device):
 
 
 def find_file(name, models_dir):
-    for c in [models_dir / name, *glob.glob(f"/kaggle/input/**/{name}", recursive=True),
-              Path("assets/big-data/public_weights/raptor-knee-maxspan") / name]:
+    kaggle = [d / name for d in search_input(lambda f: name in f)] if os.path.exists("/kaggle/input") else []
+    for c in [models_dir / name, *kaggle, Path("assets/big-data/public_weights/raptor-knee-maxspan") / name]:
         if Path(c).exists():
             return Path(c)
     raise RuntimeError(f"{name} not found")
@@ -256,23 +256,32 @@ def predict(model, x_u8, img, chunk=32):
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def search_input(pred, root="/kaggle/input"):
+    """Directories under /kaggle/input (DICOM trees pruned) whose file names satisfy ``pred``."""
+    hits = []
+    for d, sub, files in os.walk(root):
+        sub[:] = [x for x in sub if not x.endswith(("_series", "_images"))]
+        if pred(files):
+            hits.append(Path(d))
+    return hits
+
+
 def find_competition():
     for c in ["/kaggle/input/competitions/rsna-knee-abnormality-detection",
               "/kaggle/input/rsna-knee-abnormality-detection"]:
         if os.path.exists(f"{c}/test.csv"):
             return Path(c)
-    for d, _, f in os.walk("/kaggle/input"):
-        if "test.csv" in f and "sample_submission.csv" in f:
-            return Path(d)
+    hits = search_input(lambda f: "test.csv" in f and "sample_submission.csv" in f)
+    if hits:
+        return hits[0]
     raise RuntimeError("competition data not found under /kaggle/input")
 
 
 def find_models():
-    hits = [h for h in glob.glob("/kaggle/input/**/config.json", recursive=True)
-            if glob.glob(str(Path(h).parent / "*__fold*.pt"))]
+    hits = search_input(lambda f: "config.json" in f and any("__fold" in x for x in f))
     if not hits:
         raise RuntimeError("model config.json not found under /kaggle/input")
-    return Path(hits[0]).parent
+    return hits[0]
 
 
 def run(data, models_dir, out, split="test", ids=None, workers=None):
@@ -292,6 +301,7 @@ def run(data, models_dir, out, split="test", ids=None, workers=None):
             members.append((g, c["img"], load_member(p, c, dev)))
     if RAPTOR_WEIGHT > 0:
         cfg["raptor"] = {"img": RAPTOR["res"], "weight": RAPTOR_WEIGHT}
+        print(f"loaded ours | {time.time() - t0:.0f}s", flush=True)
         members.append(("raptor", RAPTOR["res"], load_raptor(models_dir, dev)))
     groups = list(cfg)
     print(f"device {dev} | {len(members)} members "
@@ -378,8 +388,10 @@ def main():
     a, _ = ap.parse_known_args()
     if a.export:
         return export_models(a.export)
+    t0 = time.time()
     data = Path(a.data) if a.data else find_competition()
     models_dir = Path(a.models) if a.models else find_models()
+    print(f"data {data} | models {models_dir} | {time.time() - t0:.0f}s", flush=True)
     ids = pd.read_csv(a.ids, dtype=str).StudyInstanceUID.tolist() if a.ids else None
     run(data, models_dir, a.out, a.split, ids, a.workers)
 

@@ -160,6 +160,10 @@
                OOF 0.9013 (T baseline 0.8994), folds 0.894-0.907; gold 5-fold mean 0.906 (0.899).
                Gains on ACL / MCL / Lateral Meniscus / Effusion (gold); Synovitis still 0.73 on gold.
                Ensemble T + S (equal weight): OOF 0.9045, gold 0.904.  Best OOF so far.
+         - [X] Self-distilled labels (=labels --oof=: 0.5 consensus4 + 0.5 T+S OOF ensemble), fold 0
+               ConvNeXt-T + EMA: val 0.9198 (+0.011) but gold 0.895 (-0.007, Effusion 0.95 -> 0.90).
+               The val gain is leakage (the OOF targets of train studies come from models that saw
+               fold 0's val split).  Not used; a clean test needs nested folds.
    - [-] Re-run the Phase 4 Grad-CAM analysis on our own model
          (=raptor_gradcam --model <fold0 best.pt>= -> =assets/processed/gradcam_own/gold_cons4_f0/=;
          fold 0 never saw the 58 gold studies).  ConvNeXt-T 256 px grids: L3 8, L2 16, L1 32, L0 64.

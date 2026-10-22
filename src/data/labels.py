@@ -10,6 +10,7 @@ recipe of the public goodpjw2008 ConvNeXt reader (``make_labels.py`` v0).
 
 Usage:
     uv run python -m src.data.labels            # writes assets/processed/labels_<name>.csv
+    uv run python -m src.data.labels --oof      # + labels_consensus4_oof50.csv (self-distilled)
 """
 
 import pandas as pd
@@ -48,6 +49,23 @@ def consensus(src, names=None):
     return (num / den).clip(0.01, 0.99)
 
 
+def oof_refined(base="consensus4", runs=("convnext_tiny_cons4_5fold", "convnext_small_ema_5fold"),
+                alpha=0.5):
+    """Self-distilled labels: ``alpha * base + (1 - alpha) * mean OOF prediction`` of the runs.
+
+    Studies without OOF predictions (the gold set) keep the base label.
+    """
+    t = pd.read_csv(OUT_DIR / f"labels_{base}.csv", index_col=0)
+    oof = sum(pd.concat([pd.read_csv(p, index_col=0) for p in sorted((OUT_DIR / "mil_runs" / r).glob("fold*/oof.csv"))])
+              for r in runs) / len(runs)
+    out = t.copy()
+    idx = oof.index.intersection(t.index)
+    out.loc[idx] = alpha * t.loc[idx] + (1 - alpha) * oof.loc[idx, LABELS]
+    path = OUT_DIR / f"labels_{base}_oof{round(alpha * 100)}.csv"
+    out.clip(0.01, 0.99).to_csv(path)
+    print(f"wrote {path} ({len(idx)} studies refined)")
+
+
 def build():
     tr = pd.read_csv(raptor.DATA_DIR / "train.csv")
     gold = tr.set_index("StudyInstanceUID")[LABELS]
@@ -65,4 +83,5 @@ def build():
 
 
 if __name__ == "__main__":
-    build()
+    import sys
+    oof_refined() if "--oof" in sys.argv else build()
