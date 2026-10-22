@@ -9,8 +9,13 @@
   "enable_tpu": false,
   "enable_internet": false,
   "machine_shape": "NvidiaTeslaT4",
-  "dataset_sources": ["tgeliot/rsna-knee-mil25d-ens"],
-  "competition_sources": ["rsna-knee-abnormality-detection"],
+  "dataset_sources": [
+    "tgeliot/rsna-knee-mil25d-ens",
+    "dreaddevelopment/raptor-knee-maxspan"
+  ],
+  "competition_sources": [
+    "rsna-knee-abnormality-detection"
+  ],
   "kernel_sources": [],
   "model_sources": []
 }

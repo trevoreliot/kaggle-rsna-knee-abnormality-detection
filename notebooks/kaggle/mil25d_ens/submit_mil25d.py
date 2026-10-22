@@ -8,7 +8,8 @@ resized to the model's ``img`` and ImageNet-normalised.
 
 Members: ``<group>__fold<k>.pt`` (fp16 state dicts, written by ``--export``)
 next to ``config.json`` ({group: {backbone, img, head, weight}}), flat so the
-Kaggle dataset needs no sub-folders.  Each group's folds are averaged, then the groups are averaged with
+Kaggle dataset needs no sub-folders.  Optionally blended (``RAPTOR_WEIGHT``) with the public
+raptor CoaTNet (dreaddevelopment/raptor-knee-maxspan, used as published).  Each group's folds are averaged, then the groups are averaged with
 their weights.  A study that fails to load keeps 0.5.
 
 Credits -- this builds directly on public work; please upvote the originals:
@@ -19,6 +20,8 @@ Credits -- this builds directly on public work; please upvote the originals:
     - laymond         datasets/laymond/rsna-knee-abnormality-qwen3-8b-weak-labels
   Label-averaging recipe and report-grouped folds:
     - goodpjw2008     datasets/goodpjw2008/rsna-knee-2-5d-convnext-reader (make_labels.py)
+  Raptor CoaTNet weights, blended in as published (CC0):
+    - Dread Development  datasets/dreaddevelopment/raptor-knee-maxspan
   Model design and preprocessing (64-slice / 5-slot sampling, 140 mm crop, 3-slice windows,
   per-label attention pooling), re-implemented and trained from ImageNet weights:
     - Dread Development (dreaddevelopment)
@@ -68,6 +71,11 @@ K_EVAL = 62
 SLOTS = [("Sagittal", 1, 18), ("Sagittal", 0, 14), ("Coronal", 1, 12), ("Coronal", 0, 8),
          ("Axial", -1, 12)]
 MAXS = sum(k for _, _, k in SLOTS)
+# Blend: our groups (config.json, sharing 1 - RAPTOR_WEIGHT) + the public raptor CoaTNet
+# (dreaddevelopment/raptor-knee-maxspan, attach it as a dataset).  RAPTOR_WEIGHT = 0 -> ours only.
+RAPTOR = {"file": "raptor_ft_coatnet_v5_full_swa.pt", "res": 384}
+RAPTOR_WEIGHT = 0.5
+BLEND = "rank"  # "rank": weighted mean of per-label rank percentiles; "prob": of probabilities
 _MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 _STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
@@ -217,6 +225,23 @@ def load_member(path, cfg, device):
     return m.eval().to(device).to(memory_format=torch.channels_last)
 
 
+def find_file(name, models_dir):
+    for c in [models_dir / name, *glob.glob(f"/kaggle/input/**/{name}", recursive=True),
+              Path("assets/big-data/public_weights/raptor-knee-maxspan") / name]:
+        if Path(c).exists():
+            return Path(c)
+    raise RuntimeError(f"{name} not found")
+
+
+def load_raptor(models_dir, device):
+    ck = torch.load(find_file(RAPTOR["file"], models_dir), map_location="cpu", weights_only=False)
+    assert list(ck["lab"]) == LABELS, ck["lab"]
+    bb = timm.create_model(ck["arch"], pretrained=False, num_classes=0, global_pool="avg")
+    m = MILClassifier(bb, bb.num_features)
+    m.load_state_dict(ck["model"])
+    return m.eval().to(device).to(memory_format=torch.channels_last)
+
+
 @torch.no_grad()
 def predict(model, x_u8, img, chunk=32):
     x = x_u8.float().div_(255)
@@ -258,46 +283,60 @@ def run(data, models_dir, out, split="test", ids=None, workers=None):
     pool = Pool(workers or os.cpu_count())
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = json.loads((models_dir / "config.json").read_text())
-    members = []  # (group, weight, img, model)
+    own = sum(c["weight"] for c in cfg.values())
+    for c in cfg.values():  # our groups share 1 - RAPTOR_WEIGHT
+        c["weight"] *= (1 - RAPTOR_WEIGHT) / own
+    members = []  # (group, img, model)
     for g, c in cfg.items():
         for p in sorted(models_dir.glob(f"{g}__fold*.pt")):
-            members.append((g, c["weight"], c["img"], load_member(p, c, dev)))
-    print(f"device {dev} | {len(members)} members: "
-          f"{ {g: sum(m[0] == g for m in members) for g in cfg} } | {time.time() - t0:.0f}s", flush=True)
+            members.append((g, c["img"], load_member(p, c, dev)))
+    if RAPTOR_WEIGHT > 0:
+        cfg["raptor"] = {"img": RAPTOR["res"], "weight": RAPTOR_WEIGHT}
+        members.append(("raptor", RAPTOR["res"], load_raptor(models_dir, dev)))
+    groups = list(cfg)
+    print(f"device {dev} | {len(members)} members "
+          f"{ {g: sum(m[0] == g for m in members) for g in groups} } | weights "
+          f"{ {g: round(cfg[g]['weight'], 3) for g in groups} } | blend {BLEND} | "
+          f"{time.time() - t0:.0f}s", flush=True)
 
     ser = pd.read_csv(data / f"{split}_series.csv", dtype=str)
     series = {k: g.to_dict("records") for k, g in ser.groupby("StudyInstanceUID")}
     if ids is None:
         ids = pd.read_csv(data / f"{split}.csv", dtype={"StudyInstanceUID": str}).StudyInstanceUID.tolist()
     root = str(data / f"{split}_series")
-    probs = {uid: np.full(len(LABELS), 0.5, np.float32) for uid in ids}
-    wsum = sum(cfg[g]["weight"] for g in cfg)
-    nfail = 0
+    gp = np.full((len(groups), len(ids), len(LABELS)), 0.5, np.float32)  # per-group probabilities
+    ok = np.zeros(len(ids), bool)
     jobs = [(u, series.get(u, []), root) for u in ids]
     with pool:
         for i, (uid, x, err) in enumerate(pool.imap(_load, jobs, chunksize=1)):
             if x is None:
-                nfail += 1
                 print(f"  FALLBACK 0.5 {uid}: {err}", flush=True)
             else:
                 x = torch.from_numpy(x).to(dev, non_blocking=True)
-                p = np.zeros(len(LABELS))
-                for g in cfg:
-                    ps = [predict(m, x, img) for gg, _, img, m in members if gg == g]
-                    p += cfg[g]["weight"] / wsum * np.mean(ps, 0)
-                probs[uid] = p.astype(np.float32)
+                for j, g in enumerate(groups):
+                    gp[j, i] = np.mean([predict(m, x, img) for gg, img, m in members if gg == g], 0)
+                ok[i] = True
             if (i + 1) % 50 == 0 or i + 1 == len(ids):
                 el = time.time() - t0
                 print(f"  {i + 1}/{len(ids)} | {el:.0f}s | {el / (i + 1):.2f} s/study", flush=True)
 
-    sub = pd.DataFrame([probs[u] for u in ids], columns=LABELS)
+    w = np.array([cfg[g]["weight"] for g in groups])[:, None, None]
+    if BLEND == "rank" and ok.sum() > 1:  # per-label rank percentiles over the studies that loaded
+        r = np.full_like(gp, 0.5)
+        r[:, ok] = gp[:, ok].argsort(1).argsort(1) / (ok.sum() - 1)
+        final = (w * r).sum(0) / w.sum()
+    else:
+        final = (w * gp).sum(0) / w.sum()
+    sub = pd.DataFrame(final.astype(np.float32), columns=LABELS)
     sub.insert(0, "StudyInstanceUID", ids)
     sample = data / "sample_submission.csv"
     if split == "test" and sample.exists():
         sub = sub[list(pd.read_csv(sample, nrows=0).columns)]
     assert np.isfinite(sub[LABELS].to_numpy()).all()
     sub.to_csv(out, index=False)
-    print(f"wrote {out}: {sub.shape}, fallbacks {nfail} | {time.time() - t0:.0f}s", flush=True)
+    pd.concat({g: pd.DataFrame(gp[j], index=ids, columns=LABELS) for j, g in enumerate(groups)},
+              names=["group", "StudyInstanceUID"]).to_csv(Path(out).with_name("group_probs.csv"))
+    print(f"wrote {out}: {sub.shape}, fallbacks {(~ok).sum()} | {time.time() - t0:.0f}s", flush=True)
     return sub
 
 
