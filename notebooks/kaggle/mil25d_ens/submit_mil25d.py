@@ -252,6 +252,10 @@ def find_models():
 
 def run(data, models_dir, out, split="test", ids=None, workers=None):
     t0 = time.time()
+    print(f"torch {torch.__version__} | timm {timm.__version__} | pydicom {pydicom.__version__} | "
+          f"cpus {os.cpu_count()}", flush=True)
+    # Fork the DICOM workers before CUDA is initialised in this process.
+    pool = Pool(workers or os.cpu_count())
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = json.loads((models_dir / "config.json").read_text())
     members = []  # (group, weight, img, model)
@@ -270,7 +274,7 @@ def run(data, models_dir, out, split="test", ids=None, workers=None):
     wsum = sum(cfg[g]["weight"] for g in cfg)
     nfail = 0
     jobs = [(u, series.get(u, []), root) for u in ids]
-    with Pool(workers or os.cpu_count()) as pool:
+    with pool:
         for i, (uid, x, err) in enumerate(pool.imap(_load, jobs, chunksize=1)):
             if x is None:
                 nfail += 1
