@@ -151,3 +151,20 @@ uv run python main.py --pipeline mil25d           # fold 0 of the own model with
   signs (effusion, lateral bone bruise) rather than the ligament.
 
 Details and numbers: [`TODO.org`](TODO.org), Phase 4.
+
+## Acknowledgements
+
+This project builds directly on public work from the Kaggle community.
+
+| What we used | Author | Source |
+|---|---|---|
+| LLM report labels (`llm_labels_v4_blend`), one of the four consensus tables | stevenleehans | [dataset](https://www.kaggle.com/datasets/stevenleehans/rsna-knee-llm-report-labels) |
+| LLM report labels (`report_labels_v2`) | pilkwang | [dataset](https://www.kaggle.com/datasets/pilkwang/rsna-knee-llm-labels) |
+| LLM report labels (`labels_llm_gpt56sol`) | lixin73 | [dataset](https://www.kaggle.com/datasets/lixin73/rsna-knee-llm-report-labels-sol56) |
+| Qwen3-8B weak labels | laymond | [dataset](https://www.kaggle.com/datasets/laymond/rsna-knee-abnormality-qwen3-8b-weak-labels) |
+| Label-averaging recipe (`make_labels.py`), report-grouped folds | goodpjw2008 | [dataset](https://www.kaggle.com/datasets/goodpjw2008/rsna-knee-2-5d-convnext-reader) |
+| "Raptor" CoaTNet weights (Grad-CAM work), and the 2.5D design and preprocessing our own model re-implements | Dread Development | [notebook](https://www.kaggle.com/code/dreaddevelopment/knee-mri-twelve-findings-from-a-single-model), [weights](https://www.kaggle.com/datasets/dreaddevelopment/raptor-knee-maxspan) |
+| Public ensemble notebook; `notebooks/kaggle/baseline.py` and `head-and-shoulders-knees-and-toes.ipynb` are copies of it | prvsiyan | [notebook](https://www.kaggle.com/code/prvsiyan/head-and-shoulders-knees-and-toes) |
+| Ensemble and label analysis that led us to blended labels | rabari9999 | [notebook](https://www.kaggle.com/code/rabari9999/rsna-knee-lb-0-95) |
+| ConvNeXt ImageNet weights | Meta AI, via [timm](https://github.com/huggingface/pytorch-image-models) | |
+| YOLO11 (pseudo-box experiment only, not in the submission) | Ultralytics | [ultralytics](https://github.com/ultralytics/ultralytics) |

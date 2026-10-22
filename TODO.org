@@ -207,6 +207,13 @@
                99.5%, MCL 86.6%; ACL 18% (lateral bone-bruise pattern).
 
 ** TODO Phase 6: Training and Kaggle Inference [0/4]
+   - [-] Submission: =notebooks/kaggle/mil25d_ens/submit_mil25d.py= (self-contained, raw DICOM ->
+         raptor preprocessing -> 5x ConvNeXt-T + 5x ConvNeXt-S/EMA, equal-weight mean; failed
+         study -> 0.5).  Local check on gold: matches training preds (max diff 0.003, AUC 0.9042).
+         Weights: private dataset =tgeliot/rsna-knee-mil25d-ens= (fp16, 742 MB, written by
+         =--export=); kernel =tgeliot/rsna-knee-mil25d-ens-infer= (script, T4, no internet).
+         Rules: notebook <= 9 h, internet off, =submission.csv=, 5/day, 2 final picks; deadline
+         2026-10-22 23:59 UTC.  Credits in the script header and README Acknowledgements.
    - [ ] Restrict =num_workers= to avoid starving the GPU.
    - [ ] K-fold on =StudyInstanceUID= (there is no PatientID column in the data).
    - [ ] Package =src/= into an offline single-file Kaggle inference script.
