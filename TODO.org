@@ -164,6 +164,14 @@
                ConvNeXt-T + EMA: val 0.9198 (+0.011) but gold 0.895 (-0.007, Effusion 0.95 -> 0.90).
                The val gain is leakage (the OOF targets of train studies come from models that saw
                fold 0's val split).  Not used; a clean test needs nested folds.
+         - [X] Gold calibration (LOOCV logistic refit of the T+S gold logits, own score +- helper
+               labels or all 12): every variant below the self-only refit (0.886; base 0.904), all-12
+               0.83-0.84.  58 studies cannot fit extra weights.  Gold vs LLM prevalence: Synovitis
+               0.47 vs 0.29, Effusion 0.60 vs 0.88, MCL 0.16 vs 0.28.  Not used.
+         - [X] 5-fold =caformer_s18_ema_5fold= (CAFormer-S18 in22k, EMA, =--grad-ckpt=; OOM without;
+               6.2 h): failed.  Folds 1-3 collapsed to the prior (loss flat 0.567, AUC ~0.5), folds
+               0/4 learned slowly (0.87/0.84).  OOF 0.699, gold 0.857.  Likely cause: no LR warm-up
+               (ConvNeXt trains fine without one).  Not used.
    - [-] Re-run the Phase 4 Grad-CAM analysis on our own model
          (=raptor_gradcam --model <fold0 best.pt>= -> =assets/processed/gradcam_own/gold_cons4_f0/=;
          fold 0 never saw the 58 gold studies).  ConvNeXt-T 256 px grids: L3 8, L2 16, L1 32, L0 64.
@@ -218,6 +226,13 @@
          =--export=); kernel =tgeliot/rsna-knee-mil25d-ens-infer= (script, T4, no internet).
          Rules: notebook <= 9 h, internet off, =submission.csv=, 5/day, 2 final picks; deadline
          2026-10-22 23:59 UTC.  Credits in the script header and README Acknowledgements.
+         Public LB (=RAPTOR_WEIGHT= = rank-blend weight of the public raptor CoaTNet, 0.928 alone):
+         | submission                     | raptor w | public |
+         | own T+S (kernel v2)            |      0.0 |  0.928 |
+         | rank blend (v5)                |      0.4 |  0.935 |
+         | rank blend (v4)                |      0.5 |  0.936 |
+         | rank blend (v6)                |      0.6 |  0.936 |
+         Final picks (recommended): the 0.5 blend + own T+S as the raptor-free hedge.
    - [ ] Restrict =num_workers= to avoid starving the GPU.
    - [ ] K-fold on =StudyInstanceUID= (there is no PatientID column in the data).
    - [ ] Package =src/= into an offline single-file Kaggle inference script.
